@@ -140,24 +140,31 @@ jobs:
           nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
           sleep 2
 
-          echo "=== serve (داخل tailnet) ==="
-          timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 2>&1 | tail -3 || echo "serve-8443 failed"
-          timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -4 || echo "serve-10000 failed"
+          echo "=== پاک‌کردن تنظیمات قبلی serve/funnel ==="
+          sudo ts funnel reset 2>&1 | tail -2 || true
+          sudo ts serve reset 2>&1 | tail -2 || true
+          sleep 2
 
-          echo "=== funnel (روی اینترنت عمومی) ==="
-          echo "--- تلاش برای 8443 ---"
-          timeout 90 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 on 2>&1 | tail -10; echo "rc8443=$?"
-          echo "--- تلاش برای 10000 ---"
-          timeout 90 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on 2>&1 | tail -12; echo "rc10000=$?"
-          sleep 3
-          echo "=== tags/effectiveTags این گره ==="
-          sudo ts status --json | jq -c '{Tags:.Self.Tags, CapTags:.Self.CapabilityVersion, DNSName:.Self.DNSName}' 2>/dev/null || true
-          echo "=== resolve نام گره ==="
-          getent hosts "$FQDN" || echo "نام گره به‌صورت عمومی حل نشد (یعنی funnel فعال نشده)"
+          echo "=== funnel مستقیم (بدون serve) ==="
+          timeout 120 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 on >/tmp/f1.log 2>&1
+          echo "rc-8443=$?"; tail -12 /tmp/f1.log
+          timeout 120 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on >/tmp/f2.log 2>&1
+          echo "rc-10000=$?"; tail -14 /tmp/f2.log
+          sleep 4
+
+          echo "=== اگر funnel نشد، serve برای دسترسی داخل tailnet ==="
+          if ! sudo ts funnel status 2>&1 | grep -qi 'internet'; then
+            timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -3 || true
+            timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 2>&1 | tail -3 || true
+            echo "serve (tailnet-only) فعال شد"
+          fi
+          sleep 2
           echo "=== serve status ==="
           sudo ts serve status 2>&1 | head -25 || true
           echo "=== funnel status ==="
           sudo ts funnel status 2>&1 | head -25 || true
+          echo "=== resolve عمومی نام گره ==="
+          getent hosts "$FQDN" 2>&1 || echo "public DNS: NXDOMAIN (funnel عمومی نشده)"
           echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@${FQDN}" >> "$GITHUB_ENV"
           echo "FUNNEL_WEB=https://${FQDN}:8443/" >> "$GITHUB_ENV"
 
@@ -266,6 +273,18 @@ jobs:
           M1=$(sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK_A $(whoami)' 2>&1 | tail -4)
           M2=$(SSHPASS_VAL="$ROOT_PASS" SSH_ASKPASS=/usr/local/bin/askpass.sh SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
                setsid -w ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK_B $(whoami)' 2>&1 | tail -4)
+          M5=$(ssh -v $SSHOPTS root@127.0.0.1 true 2>&1 | grep -iE 'debug1: (Authentications|Offering|Next authentication|Server accepts|Trying private key|Authentication succeeded)|denied' | head -10)
+          M6=$(sudo ss -ltnp 2>/dev/null | grep -E ':22\s' | head -2)
+          M7=$(sudo bash -c "echo '$ROOT_PASS' | su -c 'echo SU_ROOT_OK' root" 2>&1 | tail -2)
+          M8=$(sudo grep '^root:' /etc/shadow 2>&1 | cut -c1-22)
+          M9=$(ps -eo pid,args | grep -E '[s]shd' | head -6)
+          M10=$(sudo sshd -T 2>&1 | grep -Ei '^(match|denyusers|allowusers|denygroups|allowgroups|permitrootlogin|passwordauthentication|usepam|challengeresponse|kbdinteractive|authenticationmethods|maxauthtries) ' | head -12)
+          M11=$(sudo grep -vE '^\s*(#|$)' /etc/pam.d/sshd 2>&1 | head -12)
+          M12=$(sudo grep -vE '^\s*(#|$)' /etc/pam.d/common-auth 2>&1 | head -12)
+          M13=$(sudo tail -30 /var/log/auth.log 2>&1 | tail -14)
+          M14=$(echo "$ROOT_PASS" | wc -c)
+          M15=$(sudo ts funnel status 2>&1 | head -14)
+          M16=$(getent hosts "$FQ" 2>&1 | head -1 || echo NXDOMAIN)
           M3=$(timeout 15 bash -c "exec 3<>/dev/tcp/127.0.0.1/10000 && head -c 40 <&3" 2>&1 | head -1)
           M4=$(timeout 15 bash -c "exec 3<>/dev/tcp/$TS_IP/10000 && head -c 40 <&3" 2>&1 | head -1)
           case "$M1$M2" in *LOGIN_OK*) SSHTEST="موفق ✅ (ورود با root و پسورد تأیید شد)";; *) SSHTEST="ناموفق ❌";; esac
@@ -289,6 +308,30 @@ jobs:
             echo "$M4"
             echo "== port 22 banner on $TS_IP =="
             timeout 10 bash -c "exec 3<>/dev/tcp/$TS_IP/22 && head -c 60 <&3" 2>&1 | head -1
+            echo "== ssh -v (بخش احراز هویت) =="
+            echo "$M5"
+            echo "== چه کسی به پورت 22 گوش می‌دهد =="
+            echo "$M6"
+            echo "== پروسه‌های sshd =="
+            echo "$M9"
+            echo "== تست su با همان پسورد (PAM/shadow) =="
+            echo "$M7"
+            echo "== ابتدای سایهٔ root =="
+            echo "$M8"
+            echo "== طول پسورد (بایت+newline) =="
+            echo "$M14"
+            echo "== sshd -T کامل‌تر =="
+            echo "$M10"
+            echo "== /etc/pam.d/sshd =="
+            echo "$M11"
+            echo "== /etc/pam.d/common-auth =="
+            echo "$M12"
+            echo "== /var/log/auth.log =="
+            echo "$M13"
+            echo "== funnel status =="
+            echo "$M15"
+            echo "== resolve عمومی =="
+            echo "$M16"
             echo "== لاگ sshd =="
             sudo tail -35 /tmp/sshd.log 2>&1 || echo "no sshd log"
             echo "== ts status =="
