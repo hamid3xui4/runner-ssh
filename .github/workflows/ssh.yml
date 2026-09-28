@@ -256,6 +256,61 @@ jobs:
           else
             P10000="ناموفق ❌"
           fi
+          # ---- تست‌های دقیق + روش جایگزین askpass ----
+          cat > /tmp/askpass.sh <<'AP'
+          #!/bin/sh
+          printf '%s\n' "$SSHPASS_VAL"
+          AP
+          sudo install -m 755 /tmp/askpass.sh /usr/local/bin/askpass.sh
+          SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=10"
+          M1=$(sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK_A $(whoami)' 2>&1 | tail -4)
+          M2=$(SSHPASS_VAL="$ROOT_PASS" SSH_ASKPASS=/usr/local/bin/askpass.sh SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
+               setsid -w ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK_B $(whoami)' 2>&1 | tail -4)
+          M3=$(timeout 15 bash -c "exec 3<>/dev/tcp/127.0.0.1/10000 && head -c 40 <&3" 2>&1 | head -1)
+          M4=$(timeout 15 bash -c "exec 3<>/dev/tcp/$TS_IP/10000 && head -c 40 <&3" 2>&1 | head -1)
+          case "$M1$M2" in *LOGIN_OK*) SSHTEST="موفق ✅ (ورود با root و پسورد تأیید شد)";; *) SSHTEST="ناموفق ❌";; esac
+          case "$M3$M4" in *SSH-*) P10000="موفق ✅";; *) P10000="ناموفق ❌";; esac
+          {
+            echo '# گزارش تشخیصی'
+            echo
+            echo '```'
+            echo "== date: $(date -u) =="
+            echo "== sshd -T (تنظیمات مؤثر) =="
+            sudo sshd -T 2>&1 | grep -Ei '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication|usepam|challengeresponseauthentication|authenticationmethods|pubkeyauthentication|permitemptypasswords) ' | sort
+            echo "== passwd -S root =="
+            sudo passwd -S root 2>&1
+            echo "== sshpass test (روش ۱) =="
+            echo "$M1"
+            echo "== askpass test (روش ۲) =="
+            echo "$M2"
+            echo "== port 10000 on 127.0.0.1 =="
+            echo "$M3"
+            echo "== port 10000 on $TS_IP =="
+            echo "$M4"
+            echo "== port 22 banner on $TS_IP =="
+            timeout 10 bash -c "exec 3<>/dev/tcp/$TS_IP/22 && head -c 60 <&3" 2>&1 | head -1
+            echo "== لاگ sshd =="
+            sudo tail -35 /tmp/sshd.log 2>&1 || echo "no sshd log"
+            echo "== ts status =="
+            sudo ts status 2>&1 | head -10
+            echo "== tags این گره =="
+            sudo ts status --json 2>&1 | jq -c '{Tags:.Self.Tags,OS:.Self.OS,DNSName:.Self.DNSName,Online:.Self.Online}' 2>&1
+            echo "== serve status =="
+            sudo ts serve status 2>&1 | head -25
+            echo "== funnel status =="
+            sudo ts funnel status 2>&1 | head -25
+            echo "== resolve عمومی نام گره =="
+            getent hosts "$FQ" 2>&1 || echo "public DNS: NXDOMAIN"
+            echo '```'
+          } > /tmp/DIAG.md
+          B64D=$(base64 -w0 /tmp/DIAG.md)
+          SHAD=$(curl -s -m 20 -H "Authorization: token $PAT" "https://api.github.com/repos/${{ github.repository }}/contents/DIAG.md" | jq -r '.sha // empty')
+          [ -n "$SHAD" ] && EXTRAD=",\"sha\":\"$SHAD\"" || EXTRAD=""
+          curl -s -m 30 -o /dev/null -w 'publish DIAG.md -> HTTP %{http_code}\n' -X PUT \
+            -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/DIAG.md" \
+            -d "{\"message\":\"diagnostics\",\"content\":\"$B64D\",\"branch\":\"main\"$EXTRAD}"
+
           TOTAL="${{ github.event.inputs.minutes }}"; [ -z "$TOTAL" ] && TOTAL=350
           NOW=$(date +%s); ENDT=$(date -u -d "@$(( NOW + (TOTAL-8)*60 ))" '+%H:%M' 2>/dev/null || echo '-')
           {
