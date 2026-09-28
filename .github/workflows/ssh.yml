@@ -80,20 +80,32 @@ jobs:
           echo "=== تنظیمات مؤثر sshd ==="
           sudo sshd -T 2>/dev/null | grep -Ei '^(permitrootlogin|passwordauthentication|usepam|kbdinteractiveauthentication|pubkeyauthentication|authenticationmethods) ' | sort
 
-          if ss -ltn | grep -qE ':22\s'; then
-            echo "پورت 22 فعال بود؛ برای اعمال تنظیمات جدید، sshd بازنشانی می‌شود"
-            sudo pkill -x sshd
-            sleep 2
-          fi
-          sudo bash -c 'nohup /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &'
-          sleep 3
+          # /run/sshd باید حتماً وجود داشته باشد وگرنه sshd بالا نمی‌آید
+          sudo install -d -m 0755 -o root -g root /run/sshd
+          sudo install -d -m 0755 -o root -g root /var/run/sshd
+          echo "privil-sep dir: $(ls -ld /run/sshd)"
+          sudo /usr/sbin/sshd -t && echo "config test: OK" || echo "config test: FAIL"
+
+          # sshd پیش‌فرض ایمیج، تنظیمات ما را ندارد -> باید جایگزین شود
+          echo "sshd فعلی: $(ps -eo args | grep -E '[s]shd' | head -2)"
+          sudo pkill -x sshd
+          sleep 2
+          : | sudo tee /tmp/sshd.log >/dev/null
+          sudo bash -c 'exec /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1' &
+          sleep 4
           if ! ss -ltn | grep -qE ':22\s'; then
-            echo "sshd بالا نیامد، لاگ:"; sudo tail -25 /tmp/sshd.log
-            sudo /usr/sbin/sshd
-            sleep 2
+            echo "تلاش دوم..."
+            sudo install -d -m 0755 /run/sshd
+            sudo /usr/sbin/sshd -E /tmp/sshd2.log
+            sleep 3
           fi
           echo "sshd processes: $(pgrep -c sshd)"
-          ss -ltn | grep -E ':22\s' && echo PORT22_OK
+          echo "sshd فعلی: $(ps -eo args | grep -E '[s]shd' | head -2)"
+          if ss -ltn | grep -E ':22\s'; then echo PORT22_OK; else echo PORT22_FAIL; fi
+          echo "--- لاگ sshd ---"
+          sudo tail -20 /tmp/sshd.log 2>/dev/null
+          sudo tail -20 /tmp/sshd2.log 2>/dev/null
+          exit 0
 
       - name: verify-ssh
         timeout-minutes: 4
@@ -393,8 +405,9 @@ jobs:
               echo "[$(date -u +%H:%M)] tailscaled بازیابی شد"
             fi
             if ! ss -ltn | grep -qE ':22\s'; then
+              sudo install -d -m 0755 /run/sshd
               sudo bash -c 'nohup /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &'
-              sleep 2
+              sleep 3
               echo "[$(date -u +%H:%M)] sshd بازیابی شد"
             fi
             if ! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/; then
