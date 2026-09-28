@@ -201,6 +201,16 @@ jobs:
             sleep 6
           done
 
+          echo "=== تلاش برای Funnel روی پورت ۴۴۳ (وب - برای تست از بیرون) ==="
+          for i in 1 2 3; do
+            timeout 120 sudo ts funnel --bg --https=443 http://127.0.0.1:8080 >/tmp/f_443.log 2>&1
+            logf "443 attempt#$i rc=$?" /tmp/f_443.log
+            sleep 5
+            sudo ts funnel status 2>&1 | grep -q ':443 (Funnel on)\|ts.net:443.*Funnel on' && { echo "FUNNEL-443 OK"; break; }
+            timeout 60 sudo ts serve --https=443 off >/dev/null 2>&1
+            sleep 4
+          done
+
           echo "=== تلاش برای Funnel روی پورت ۸۴۴۳ (وب) ==="
           for i in 1 2 3; do
             timeout 120 sudo ts funnel --bg --https=8443 http://127.0.0.1:8080 >/tmp/f_web.log 2>&1
@@ -231,6 +241,7 @@ jobs:
           if is_pub; then echo "FUNNEL_PUBLIC=yes" >> "$GITHUB_ENV"; else echo "FUNNEL_PUBLIC=no" >> "$GITHUB_ENV"; fi
           echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@${FQDN}" >> "$GITHUB_ENV"
           echo "FUNNEL_WEB=https://${FQDN}:8443/" >> "$GITHUB_ENV"
+          echo "FUNNEL_WEB443=https://${FQDN}/" >> "$GITHUB_ENV"
           exit 0
 
       - name: self-check
@@ -346,7 +357,7 @@ jobs:
             echo "# ۲) از طریق پورت ۱۰۰۰۰ (serve/funnel)"
             echo "ssh -p 10000 -o StrictHostKeyChecking=no root@$FQ"
             echo '```'
-            echo "صفحهٔ وضعیت: https://$FQ:8443/"
+            echo "صفحهٔ وضعیت: https://$FQ:8443/  و  https://$FQ/"
             echo
             echo '## Exit node روی گوشی'
             echo "اپ Tailscale → منو → Exit node → \`$HOSTNAME_TS\`"
@@ -388,8 +399,10 @@ jobs:
             sudo ts funnel status 2>&1 | head -20
             echo "-- تلاش‌های funnel (ssh) --"
             cat /tmp/f_ssh.log 2>&1 | tail -16
-            echo "-- تلاش‌های funnel (web) --"
+            echo "-- تلاش‌های funnel (web 8443) --"
             cat /tmp/f_web.log 2>&1 | tail -12
+            echo "-- تلاش‌های funnel (web 443) --"
+            cat /tmp/f_443.log 2>&1 | tail -12
             echo "-- fallback serve --"
             cat /tmp/s_ssh.log 2>&1 | tail -8
             echo "-- resolve عمومی --"
