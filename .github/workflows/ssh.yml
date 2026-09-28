@@ -1,0 +1,142 @@
+name: ssh-runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'مدت زنده ماندن (دقیقه) - حداکثر 355'
+        required: false
+        default: '355'
+
+concurrency:
+  group: ssh-runner
+  cancel-in-progress: false
+
+jobs:
+  runner:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: setup-ssh
+        timeout-minutes: 5
+        env:
+          ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
+          PUBKEY: ${{ secrets.SSH_PUBKEY }}
+        run: |
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y openssh-server >/dev/null
+          sudo mkdir -p /var/run/sshd /run/sshd
+
+          # پسورد root
+          if [ -z "$ROOT_PASS" ]; then
+            ROOT_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+            echo "GENERATED_ROOT_PASS=$ROOT_PASS" >> "$GITHUB_ENV"
+          fi
+          echo "root:$ROOT_PASS" | sudo chpasswd
+          sudo passwd -u root >/dev/null 2>&1 || true
+
+          # کلید عمومی اختیاری
+          if [ -n "$PUBKEY" ]; then
+            sudo mkdir -p /root/.ssh
+            echo "$PUBKEY" | sudo tee -a /root/.ssh/authorized_keys >/dev/null
+            sudo chmod 700 /root/.ssh
+            sudo chmod 600 /root/.ssh/authorized_keys
+          fi
+
+          # پیکربندی sshd
+          sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?X11Forwarding.*/X11Forwarding yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?ClientAliveCountMax.*/ClientAliveCountMax 100/' /etc/ssh/sshd_config
+          echo 'PermitRootLogin yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
+          echo 'PasswordAuthentication yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
+
+          sudo ssh-keygen -A >/dev/null
+          sudo /usr/sbin/sshd -D -e &
+          sleep 2
+          ss -ltnp | grep ':22 ' || sudo netstat -ltnp | grep ':22' || true
+          echo "sshd running: $(pgrep -c sshd)"
+
+      - name: setup-tailscale
+        timeout-minutes: 5
+        env:
+          TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -qq install -y curl ca-certificates >/dev/null
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || true
+          sudo mkdir -p /var/run/tailscale /var/lib/tailscale
+          # رانر GitHub سیستم systemd ندارد -> tailscaled دستی اجرا می‌شود
+          sudo nohup tailscaled --tun=userspace-networking \
+               --socket=/var/run/tailscale/tailscaled.sock \
+               --statedir=/var/lib/tailscale \
+               > /tmp/tailscaled.log 2>&1 &
+          for i in $(seq 1 20); do
+            if tailscale status >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          sudo -E tailscale up --authkey="$TSKEY" --hostname="gha-$(date +%s | tail -c 6)" --reset --accept-routes=false || \
+            tailscale up --authkey="$TSKEY" --hostname="gha-$(date +%s | tail -c 6)" --reset
+          sleep 2
+          TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
+          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
+          echo "tailscale ip: $TS_IP"
+
+      - name: print-connection-info
+        env:
+          ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
+          GENERATED: ${{ env.GENERATED_ROOT_PASS }}
+        run: |
+          PASS="${ROOT_PASS:-$GENERATED}"
+          PUBIP=$(curl -s -m 10 https://api.ipify.org || echo "n/a")
+          HOST=$(hostname)
+          TS_IP="${TS_IP:-$(tailscale ip -4 2>/dev/null | head -1)}"
+          {
+            echo "=============================================="
+            echo "  سرور Ubuntu 22.04 آماده است"
+            echo "=============================================="
+            echo "hostname        : $HOST"
+            echo "public ip       : $PUBIP  (ورودی از بیرون بسته است)"
+            echo "tailscale ip    : $TS_IP  <-- از این استفاده کنید"
+            echo "user            : root"
+            echo "password        : $PASS"
+            echo "----------------------------------------------"
+            echo "دستور اتصال:"
+            echo "  ssh root@$TS_IP"
+            echo "----------------------------------------------"
+            echo "tailscale status:"
+            tailscale status 2>/dev/null | head -20 || true
+            echo "=============================================="
+          } | tee /tmp/conn.txt
+          # برای اینکه در لاگ GitHub هم با جست‌وجو پیدا شود
+          echo "SSH_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
+      - name: keep-alive
+        timeout-minutes: 360
+        run: |
+          TOTAL=${{ github.event.inputs.minutes || 355 }}
+          [ -z "$TOTAL" ] && TOTAL=355
+          ENDS=$(( $(date +%s) + TOTAL*60 ))
+          echo "سرور تا $TOTAL دقیقه زنده می‌ماند."
+          while [ "$(date +%s)" -lt "$ENDS" ]; do
+            if ! pgrep -x tailscaled >/dev/null; then
+              sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock --statedir=/var/lib/tailscale >/tmp/tailscaled.log 2>&1 &
+              sleep 2
+              tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --reset >/dev/null 2>&1 || true
+              echo "[$(date -u +%H:%M:%S)] tailscaled restarted"
+            fi
+            if ! pgrep -x sshd >/dev/null; then
+              sudo /usr/sbin/sshd -D -e & sleep 1
+              echo "[$(date -u +%H:%M:%S)] sshd restarted"
+            fi
+            echo "[$(date -u +%H:%M:%S)] alive | ts=$(tailscale ip -4 2>/dev/null | head -1) | ssh=$(pgrep -c sshd 2>/dev/null || echo 0)"
+            sleep 60
+          done
+          echo "زمان تمام شد."
