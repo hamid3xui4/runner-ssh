@@ -21,6 +21,10 @@ concurrency:
 env:
   HOSTNAME_TS: gha-ubuntu
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   runner:
     runs-on: ubuntu-22.04
@@ -32,24 +36,34 @@ jobs:
           ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
           PUBKEY: ${{ secrets.SSH_PUBKEY }}
         run: |
-          set -e
+          set +e +o pipefail
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get -qq update
           sudo apt-get -qq install -y openssh-server sshpass curl net-tools >/dev/null
           sudo mkdir -p /run/sshd
+
           echo "root:$ROOT_PASS" | sudo chpasswd
-          sudo passwd -u root >/dev/null 2>&1 || true
+          sudo passwd -u root >/dev/null 2>&1
+
+          # کاربر پشتیبان با sudo بدون پسورد
+          if ! id hamid >/dev/null 2>&1; then sudo useradd -m -s /bin/bash hamid; fi
+          echo "hamid:$ROOT_PASS" | sudo chpasswd
+          echo 'hamid ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/99-hamid >/dev/null
+          sudo chmod 440 /etc/sudoers.d/99-hamid
+
           if [ -n "${PUBKEY:-}" ]; then
-            sudo install -d -m 700 /root/.ssh
-            echo "$PUBKEY" | sudo tee /root/.ssh/authorized_keys >/dev/null
-            sudo chmod 600 /root/.ssh/authorized_keys
+            for u in /root /home/hamid; do
+              sudo install -d -m 700 "$u/.ssh"
+              echo "$PUBKEY" | sudo tee "$u/.ssh/authorized_keys" >/dev/null
+              sudo chmod 600 "$u/.ssh/authorized_keys"
+            done
           fi
-          # OpenSSH اولین مقدار را می‌پذیرد و Include اول فایل است -> drop-in با پیشوند 00
+
           sudo mkdir -p /etc/ssh/sshd_config.d
-          sudo tee /etc/ssh/sshd_config.d/00-runner.conf >/dev/null <<'EOF'
+          cat > /tmp/00-runner.conf <<'EOF'
           PermitRootLogin yes
           PasswordAuthentication yes
-          KbdInteractiveAuthentication no
+          KbdInteractiveAuthentication yes
           PubkeyAuthentication yes
           UsePAM yes
           X11Forwarding yes
@@ -57,41 +71,57 @@ jobs:
           ClientAliveInterval 60
           ClientAliveCountMax 1000
           EOF
-          sudo sed -i 's/^          //' /etc/ssh/sshd_config.d/00-runner.conf
+          sed -i 's/^          //' /tmp/00-runner.conf
+          sudo install -m 644 /tmp/00-runner.conf /etc/ssh/sshd_config.d/00-runner.conf
           grep -q '^Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config \
             || echo 'Include /etc/ssh/sshd_config.d/*.conf' | sudo tee -a /etc/ssh/sshd_config >/dev/null
           sudo ssh-keygen -A >/dev/null
+
           echo "=== تنظیمات مؤثر sshd ==="
-          sudo sshd -T 2>/dev/null | grep -Ei '^(permitrootlogin|passwordauthentication|usepam|kbdinteractiveauthentication|pubkeyauthentication) ' | sort
-          echo "=== فایل‌های sshd_config.d ==="
-          ls -la /etc/ssh/sshd_config.d/ || true
-          grep -rniE 'passwordauthentication|permitrootlogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ || true
-          echo "=== وضعیت حساب root ==="
-          sudo passwd -S root || true
-          sudo mkdir -p /run/sshd
-          sudo /usr/sbin/sshd -t && echo "sshd config test: OK"
-          start_sshd() {
-            sudo bash -c 'nohup /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &'
-            sleep 2
-          }
+          sudo sshd -T 2>/dev/null | grep -Ei '^(permitrootlogin|passwordauthentication|usepam|kbdinteractiveauthentication|pubkeyauthentication|authenticationmethods) ' | sort
+
           if ss -ltn | grep -qE ':22\s'; then
-            echo "پورت 22 از قبل در حال گوش‌دادن است"
-          else
-            start_sshd
-          fi
-          if ! ss -ltn | grep -qE ':22\s'; then
-            echo "--- sshd بالا نیامد؛ لاگ: ---"
-            sudo tail -30 /tmp/sshd.log || true
-            echo "--- تلاش دوم پس از آزادسازی پورت ---"
-            sudo pkill -x sshd || true
+            echo "پورت 22 فعال بود؛ برای اعمال تنظیمات جدید، sshd بازنشانی می‌شود"
+            sudo pkill -x sshd
             sleep 2
-            start_sshd
           fi
-          sleep 1
-          echo "sshd processes: $(pgrep -c sshd || echo 0)"
+          sudo bash -c 'nohup /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &'
+          sleep 3
+          if ! ss -ltn | grep -qE ':22\s'; then
+            echo "sshd بالا نیامد، لاگ:"; sudo tail -25 /tmp/sshd.log
+            sudo /usr/sbin/sshd
+            sleep 2
+          fi
+          echo "sshd processes: $(pgrep -c sshd)"
           ss -ltn | grep -E ':22\s' && echo PORT22_OK
-          echo "--- آخرین خطوط لاگ sshd ---"
-          sudo tail -8 /tmp/sshd.log || true
+
+      - name: verify-ssh
+        timeout-minutes: 4
+        env:
+          ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
+        run: |
+          set +e +o pipefail
+          O="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o NumberOfPasswordPrompts=1"
+          echo "=== تست ۱: ورود root با پسورد ==="
+          sshpass -p "$ROOT_PASS" ssh $O -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            root@127.0.0.1 'echo ROOT_LOGIN_OK; whoami; lsb_release -ds' 2>&1 | tail -5
+          echo "=== تست ۲: ورود hamid با پسورد ==="
+          sshpass -p "$ROOT_PASS" ssh $O -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            hamid@127.0.0.1 'echo HAMID_LOGIN_OK; whoami; sudo -n whoami' 2>&1 | tail -5
+          echo "=== وضعیت hash پسورد (قفل نبودن) ==="
+          echo "root  : $(sudo getent shadow root | cut -d: -f2 | cut -c1-4)"
+          echo "hamid : $(sudo getent shadow hamid | cut -d: -f2 | cut -c1-4)"
+          echo "=== چه پروسه‌ای به ۲۲ گوش می‌دهد ==="
+          sudo ss -ltnp | grep -E ':22\s'
+          ps -eo pid,ppid,args | grep -E '[s]shd'
+          echo "=== لاگ sshd ==="
+          sudo tail -20 /tmp/sshd.log 2>/dev/null || echo "بدون لاگ"
+          echo "=== auth.log ==="
+          sudo tail -20 /var/log/auth.log 2>/dev/null | tail -12 || echo "بدون auth.log"
+          echo "=== ssh -v (بخش احراز هویت) ==="
+          sshpass -p "$ROOT_PASS" ssh -v $O -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            root@127.0.0.1 true 2>&1 | grep -iE 'authentications that can continue|Next authentication|denied|succeeded|Server accepts key' | head -8
+          exit 0
 
       - name: setup-tailscale
         timeout-minutes: 8
@@ -99,15 +129,15 @@ jobs:
           TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
           TSAPI: ${{ secrets.TAILSCALE_API_TOKEN }}
         run: |
-          set -e
+          set +e +o pipefail
           export DEBIAN_FRONTEND=noninteractive
-          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || true
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
           sudo mkdir -p /var/run/tailscale /var/lib/tailscale
           printf '#!/bin/bash\nexec tailscale --socket=/var/run/tailscale/tailscaled.sock "$@"\n' \
             | sudo tee /usr/local/bin/ts >/dev/null
           sudo chmod +x /usr/local/bin/ts
-          sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
-          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+          sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
 
           if [ -n "$TSAPI" ]; then
             for id in $(curl -s -m 25 -u "$TSAPI:" "https://api.tailscale.com/api/v2/tailnet/-/devices" \
@@ -120,57 +150,51 @@ jobs:
                --statedir=/var/lib/tailscale >/tmp/tailscaled.log 2>&1 &
           for i in $(seq 1 25); do sudo ts status >/dev/null 2>&1 && break; sleep 1; done
           sudo -E ts up --authkey="$TSKEY" --hostname="$HOSTNAME_TS" --reset \
-               --advertise-exit-node --accept-routes=false --accept-dns=false
+               --advertise-exit-node --accept-routes=false --accept-dns=false 2>&1 | tail -5
           sleep 3
           TS_IP=$(sudo ts ip -4 | head -1)
           FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
           { echo "TS_IP=$TS_IP"; echo "FQDN=$FQ"; } >> "$GITHUB_ENV"
           echo "TAILSCALE IP = $TS_IP   FQDN = $FQ"
-          echo "--- وضعیت گره‌ها ---"
-          sudo ts status | head -8 || true
-          echo "--- exit node ---"
-          sudo ts status --self 2>&1 | head -5 || true
+          sudo ts status | head -8
+          exit 0
 
       - name: setup-funnel
-        shell: bash
         timeout-minutes: 8
         run: |
+          set +e +o pipefail
           mkdir -p /tmp/status && cd /tmp/status
           printf '<!doctype html><meta charset=utf-8><title>runner</title><h1>Ubuntu 22.04 runner</h1><pre>host: %s\nts ip: %s\ntime: %s</pre>\n' \
             "$(hostname)" "${TS_IP:-n/a}" "$(date -u)" > index.html
           nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
           sleep 2
-          echo "tailscale version: $(tailscale version | head -1)"
-
-          echo "=== reset ==="
-          sudo ts funnel reset >/tmp/r1.log 2>&1; echo "rc-funnel-reset=$?"; tail -3 /tmp/r1.log
-          sudo ts serve reset  >/tmp/r2.log 2>&1; echo "rc-serve-reset=$?";  tail -3 /tmp/r2.log
+          echo "tailscale: $(tailscale version | head -1)"
+          sudo ts funnel reset >/dev/null 2>&1
+          sudo ts serve reset >/dev/null 2>&1
           sleep 2
 
-          echo "=== funnel help ==="
-          sudo ts funnel --help >/tmp/fh.log 2>&1; echo "rc-help=$?"; head -40 /tmp/fh.log
-
-          try() {
-            label="$1"; shift
-            out=$(timeout 100 sudo ts "$@" 2>&1); rc=$?
-            echo "----- $label (rc=$rc) -----"
-            echo "$out" | tail -12
-            return $rc
-          }
-
-          echo "=== web 8443 ==="
-          try "A funnel --bg --yes --https=8443 URL on" funnel --bg --yes --https=8443 http://127.0.0.1:8080 on ||           try "B funnel --bg --https=8443 URL on" funnel --bg --https=8443 http://127.0.0.1:8080 on ||           try "C funnel --bg --yes 8443 on" funnel --bg --yes 8443 on ||           try "D serve --bg --https=8443" serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 || echo "web setup failed"
-
-          echo "=== ssh 10000 ==="
-          try "E funnel --bg --yes --tls-terminated-tcp=10000 on" funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on ||           try "F funnel --bg --tls-terminated-tcp=10000 on" funnel --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on ||           try "G funnel --bg --yes --tcp=10000 on" funnel --bg --yes --tcp=10000 tcp://127.0.0.1:22 on ||           try "H serve --bg --tls-terminated-tcp=10000" serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 || echo "ssh-forward failed"
-
+          echo "=== FUNNEL: SSH روی پورت 10000 (TLS-terminated TCP) ==="
+          timeout 120 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -14
+          echo "rc=$?"
+          echo "=== FUNNEL: وب روی 8443 ==="
+          timeout 120 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 2>&1 | tail -12
+          echo "rc=$?"
           sleep 4
+
+          FS=$(sudo ts funnel status 2>&1)
+          if ! echo "$FS" | grep -qi 'internet'; then
+            echo "funnel عمومی نشد -> فعال‌سازی serve برای دسترسی داخل tailnet"
+            timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -4
+            timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 2>&1 | tail -4
+          fi
+          sleep 2
           echo "=== serve status ==="
           sudo ts serve status 2>&1 | head -25
           echo "=== funnel status ==="
           sudo ts funnel status 2>&1 | head -25
-          echo "=== resolve ==="
+          echo "=== resolve عمومی ==="
           getent hosts "$FQDN" 2>&1 || echo "public DNS: NXDOMAIN"
+          if echo "$FS" | grep -qi 'internet'; then echo "FUNNEL_PUBLIC=yes" >> "$GITHUB_ENV"; else echo "FUNNEL_PUBLIC=no" >> "$GITHUB_ENV"; fi
           echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@${FQDN}" >> "$GITHUB_ENV"
           echo "FUNNEL_WEB=https://${FQDN}:8443/" >> "$GITHUB_ENV"
           exit 0
@@ -181,42 +205,24 @@ jobs:
         env:
           ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
         run: |
+          set +e +o pipefail
+          O="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o NumberOfPasswordPrompts=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no"
           R=0
-          say() { echo "$@"; }
-          say "### 1) port 22"
-          ss -ltn | grep -E ':22\s' >/dev/null && say OK1 || { say FAIL1; R=1; }
-
-          say "### 2) ورود SSH با پسورد روی loopback"
-          SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1"
-          for t in 1 2 3 4 5 6; do
-            sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 true 2>/dev/null && break
-            sleep 3
-          done
-          if sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK $(whoami) | $(lsb_release -ds)' 2>/tmp/ssherr.txt; then
-            say OK2
-          else
-            say FAIL2
-            say "--- خطای کلاینت ---"; cat /tmp/ssherr.txt | tail -10
-            say "--- لاگ sshd ---"; sudo tail -25 /tmp/sshd.log || true
-            say "--- ssh -v ---"; sshpass -p "$ROOT_PASS" ssh -v $SSHOPTS root@127.0.0.1 true 2>&1 | grep -iE 'authenticat|password|denied|method' | tail -12 || true
-            R=2
-          fi
-
-          say "### 3) tailscale ip"
-          sudo ts ip -4 | head -1 && say OK3 || { say FAIL3; R=3; }
-
-          say "### 4) exit node"
-          if sudo ts status --peers 2>&1 | grep -qi 'offers exit node' || sudo ts status 2>&1 | grep -q 'offers exit node'; then
-            say "OK4 - exit node تبلیغ می‌شود"
-          else
-            say "WARN4"; sudo ts status 2>&1 | head -6 || true
-          fi
-
-          say "### 5) serve/funnel config"
-          sudo ts funnel status 2>&1 | head -12 || true
-          sudo ts funnel status 2>&1 | grep -qi 'available on the internet\|funnel' && say "OK5 - funnel فعال" || say "WARN5 - funnel فقط داخل tailnet"
-
-          say "### 6) تست پورت 10000 روی IP داخلی tailscale"
+          echo "### 1) پورت 22"
+          ss -ltn | grep -E ':22\s' >/dev/null && echo OK1 || { echo FAIL1; R=1; }
+          echo "### 2) ورود root با پسورد"
+          OUT=$(sshpass -p "$ROOT_PASS" ssh $O root@127.0.0.1 'echo LOGIN_OK $(whoami)' 2>&1)
+          echo "$OUT" | tail -3
+          case "$OUT" in *LOGIN_OK*) echo OK2;; *) echo FAIL2; [ $R -eq 0 ] && R=2;; esac
+          echo "### 3) ورود hamid با پسورد"
+          OUT3=$(sshpass -p "$ROOT_PASS" ssh $O hamid@127.0.0.1 'echo HAMID_OK $(sudo -n whoami)' 2>&1)
+          echo "$OUT3" | tail -3
+          case "$OUT3" in *HAMID_OK*) echo OK3;; *) echo FAIL3;; esac
+          echo "### 4) tailscale ip"
+          sudo ts ip -4 | head -1 && echo OK4 || { echo FAIL4; [ $R -eq 0 ] && R=4; }
+          echo "### 5) exit node"
+          if sudo ts status 2>&1 | grep -q 'offers exit node'; then echo "OK5 - exit node فعال"; else echo WARN5; fi
+          echo "### 6) پورت 10000 از طریق IP tailscale (TLS)"
           cat > /tmp/probe.py <<'PY'
           import socket, ssl, sys
           host, port = sys.argv[1], int(sys.argv[2])
@@ -224,8 +230,8 @@ jobs:
               try:
                   s = socket.create_connection((host, port), timeout=15)
                   if mode == "tls":
-                      ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-                      s = ctx.wrap_socket(s, server_hostname=host)
+                      c = ssl.create_default_context(); c.check_hostname = False; c.verify_mode = ssl.CERT_NONE
+                      s = c.wrap_socket(s, server_hostname=host)
                   s.settimeout(15)
                   b = s.recv(120).decode(errors="replace").strip(); s.close()
                   if b:
@@ -234,186 +240,144 @@ jobs:
                   print(mode + " failed: " + type(e).__name__ + ": " + str(e))
           print("NO-BANNER"); sys.exit(1)
           PY
-          python3 /tmp/probe.py "$TS_IP" 10000 || say "WARN6"
-
-          say "### 7) تست از طریق نام عمومی funnel"
-          say "DNS: $(getent hosts "$FQDN" | head -1 || echo 'حل نشد')"
-          timeout 40 python3 /tmp/probe.py "$FQDN" 10000 || say "WARN7 - funnel عمومی هنوز در دسترس نیست"
-          code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "https://$FQDN:8443/" || echo 000)
-          say "web https://$FQDN:8443/ -> $code"
-
-          say "### جمع‌بندی"
-          if [ "$R" = "0" ]; then say "ALL_CORE_TESTS_PASSED"; else say "CORE_FAILURE_AT_STEP_$R"; fi
+          python3 /tmp/probe.py "$TS_IP" 10000 && echo OK6 || echo WARN6
+          echo "### 7) پورت 22 از طریق IP tailscale"
+          python3 /tmp/probe.py "$TS_IP" 22 && echo OK7 || echo WARN7
+          echo "### 8) funnel عمومی"
+          if [ "${FUNNEL_PUBLIC:-no}" = "yes" ]; then
+            python3 /tmp/probe.py "$FQDN" 10000 && echo OK8 || echo WARN8
+            echo "web -> $(curl -s -m 20 -o /dev/null -w '%{http_code}' "https://$FQDN:8443/")"
+          else
+            echo "WARN8 - funnel عمومی فعال نیست"
+          fi
+          echo "### جمع‌بندی"
+          [ "$R" = "0" ] && echo ALL_CORE_TESTS_PASSED || echo "CORE_FAILURE_AT_STEP_$R"
           echo "CHECK_RESULT=$R" >> "$GITHUB_ENV"
+          exit 0
 
       - name: publish-info
-        shell: bash
         timeout-minutes: 4
         env:
           PAT: ${{ secrets.GH_PAT }}
           ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
         run: |
+          set +e +o pipefail
           TS_IP=$(sudo ts ip -4 | head -1)
           FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
-          EXITN=$(sudo ts status 2>&1 | grep -q 'offers exit node' && echo 'فعال ✅' || echo 'غيرفعال ❌')
-          FUNS=$(sudo ts funnel status 2>&1 | grep -qi 'internet' && echo 'عمومی ✅' || echo 'فقط داخل tailnet ⚠️')
-          # تست واقعی ورود با پسورد
-          if sshpass -p "$ROOT_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-               -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 \
-               root@127.0.0.1 'echo ok' >/dev/null 2>&1; then
-            SSHTEST="موفق ✅ (ورود با root و پسورد تأیید شد)"
-          else
-            SSHTEST="ناموفق ❌"
-          fi
-          # تست پورت ۱۰۰۰۰ روی IP داخلی
-          if timeout 15 bash -c "exec 3<>/dev/tcp/$TS_IP/10000 && head -c 40 <&3" 2>/dev/null | grep -q SSH; then
-            P10000="موفق ✅"
-          else
-            P10000="ناموفق ❌"
-          fi
-          # ---- تست‌های دقیق + روش جایگزین askpass ----
-          cat > /tmp/askpass.sh <<'AP'
-          #!/bin/sh
-          printf '%s\n' "$SSHPASS_VAL"
-          AP
-          sudo install -m 755 /tmp/askpass.sh /usr/local/bin/askpass.sh
-          SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=10"
-          M1=$(sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK_A $(whoami)' 2>&1 | tail -4)
-          M2=$(SSHPASS_VAL="$ROOT_PASS" SSH_ASKPASS=/usr/local/bin/askpass.sh SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
-               setsid -w ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK_B $(whoami)' 2>&1 | tail -4)
-          M5=$(ssh -v $SSHOPTS root@127.0.0.1 true 2>&1 | grep -iE 'debug1: (Authentications|Offering|Next authentication|Server accepts|Trying private key|Authentication succeeded)|denied' | head -10)
-          M6=$(sudo ss -ltnp 2>/dev/null | grep -E ':22\s' | head -2)
-          M7=$(sudo bash -c "echo '$ROOT_PASS' | su -c 'echo SU_ROOT_OK' root" 2>&1 | tail -2)
-          M8=$(sudo grep '^root:' /etc/shadow 2>&1 | cut -c1-22)
-          M9=$(ps -eo pid,args | grep -E '[s]shd' | head -6)
-          M10=$(sudo sshd -T 2>&1 | grep -Ei '^(match|denyusers|allowusers|denygroups|allowgroups|permitrootlogin|passwordauthentication|usepam|challengeresponse|kbdinteractive|authenticationmethods|maxauthtries) ' | head -12)
-          M11=$(sudo grep -vE '^\s*(#|$)' /etc/pam.d/sshd 2>&1 | head -12)
-          M12=$(sudo grep -vE '^\s*(#|$)' /etc/pam.d/common-auth 2>&1 | head -12)
-          M13=$(sudo tail -30 /var/log/auth.log 2>&1 | tail -14)
-          M14=$(echo "$ROOT_PASS" | wc -c)
-          M15=$(sudo ts funnel status 2>&1 | head -14)
-          M16=$(getent hosts "$FQ" 2>&1 | head -1 || echo NXDOMAIN)
-          M3=$(timeout 15 bash -c "exec 3<>/dev/tcp/127.0.0.1/10000 && head -c 40 <&3" 2>&1 | head -1)
-          M4=$(timeout 15 bash -c "exec 3<>/dev/tcp/$TS_IP/10000 && head -c 40 <&3" 2>&1 | head -1)
-          case "$M1$M2" in *LOGIN_OK*) SSHTEST="موفق ✅ (ورود با root و پسورد تأیید شد)";; *) SSHTEST="ناموفق ❌";; esac
-          case "$M3$M4" in *SSH-*) P10000="موفق ✅";; *) P10000="ناموفق ❌";; esac
-          {
-            echo '# گزارش تشخیصی'
-            echo
-            echo '```'
-            echo "== date: $(date -u) =="
-            echo "== sshd -T (تنظیمات مؤثر) =="
-            sudo sshd -T 2>&1 | grep -Ei '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication|usepam|challengeresponseauthentication|authenticationmethods|pubkeyauthentication|permitemptypasswords) ' | sort
-            echo "== passwd -S root =="
-            sudo passwd -S root 2>&1
-            echo "== sshpass test (روش ۱) =="
-            echo "$M1"
-            echo "== askpass test (روش ۲) =="
-            echo "$M2"
-            echo "== port 10000 on 127.0.0.1 =="
-            echo "$M3"
-            echo "== port 10000 on $TS_IP =="
-            echo "$M4"
-            echo "== port 22 banner on $TS_IP =="
-            timeout 10 bash -c "exec 3<>/dev/tcp/$TS_IP/22 && head -c 60 <&3" 2>&1 | head -1
-            echo "== ssh -v (بخش احراز هویت) =="
-            echo "$M5"
-            echo "== چه کسی به پورت 22 گوش می‌دهد =="
-            echo "$M6"
-            echo "== پروسه‌های sshd =="
-            echo "$M9"
-            echo "== تست su با همان پسورد (PAM/shadow) =="
-            echo "$M7"
-            echo "== ابتدای سایهٔ root =="
-            echo "$M8"
-            echo "== طول پسورد (بایت+newline) =="
-            echo "$M14"
-            echo "== sshd -T کامل‌تر =="
-            echo "$M10"
-            echo "== /etc/pam.d/sshd =="
-            echo "$M11"
-            echo "== /etc/pam.d/common-auth =="
-            echo "$M12"
-            echo "== /var/log/auth.log =="
-            echo "$M13"
-            echo "== funnel status =="
-            echo "$M15"
-            echo "== resolve عمومی =="
-            echo "$M16"
-            echo "== لاگ sshd =="
-            sudo tail -35 /tmp/sshd.log 2>&1 || echo "no sshd log"
-            echo "== ts status =="
-            sudo ts status 2>&1 | head -10
-            echo "== tags این گره =="
-            sudo ts status --json 2>&1 | jq -c '{Tags:.Self.Tags,OS:.Self.OS,DNSName:.Self.DNSName,Online:.Self.Online}' 2>&1
-            echo "== serve status =="
-            sudo ts serve status 2>&1 | head -25
-            echo "== funnel status =="
-            sudo ts funnel status 2>&1 | head -25
-            echo "== resolve عمومی نام گره =="
-            getent hosts "$FQ" 2>&1 || echo "public DNS: NXDOMAIN"
-            echo '```'
-          } > /tmp/DIAG.md
-          B64D=$(base64 -w0 /tmp/DIAG.md)
-          SHAD=$(curl -s -m 20 -H "Authorization: token $PAT" "https://api.github.com/repos/${{ github.repository }}/contents/DIAG.md" | jq -r '.sha // empty')
-          [ -n "$SHAD" ] && EXTRAD=",\"sha\":\"$SHAD\"" || EXTRAD=""
-          curl -s -m 30 -o /dev/null -w 'publish DIAG.md -> HTTP %{http_code}\n' -X PUT \
-            -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/contents/DIAG.md" \
-            -d "{\"message\":\"diagnostics\",\"content\":\"$B64D\",\"branch\":\"main\"$EXTRAD}"
-
+          O="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o NumberOfPasswordPrompts=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no"
+          A=$(sshpass -p "$ROOT_PASS" ssh $O root@127.0.0.1 'echo ROOT_LOGIN_OK' 2>&1)
+          B=$(sshpass -p "$ROOT_PASS" ssh $O hamid@127.0.0.1 'echo HAMID_LOGIN_OK' 2>&1)
+          case "$A" in *ROOT_LOGIN_OK*) RT="موفق ✅";; *) RT="ناموفق ❌";; esac
+          case "$B" in *HAMID_LOGIN_OK*) HT="موفق ✅";; *) HT="ناموفق ❌";; esac
+          sudo ts status 2>&1 | grep -q 'offers exit node' && EX="فعال ✅" || EX="غيرفعال ❌"
+          [ "${FUNNEL_PUBLIC:-no}" = "yes" ] && FU="عمومی ✅" || FU="فقط داخل tailnet ⚠️"
           TOTAL="${{ github.event.inputs.minutes }}"; [ -z "$TOTAL" ] && TOTAL=350
-          NOW=$(date +%s); ENDT=$(date -u -d "@$(( NOW + (TOTAL-8)*60 ))" '+%H:%M' 2>/dev/null || echo '-')
+          ENDT=$(date -u -d "@$(( $(date +%s) + (TOTAL-8)*60 ))" '+%H:%M' 2>/dev/null || echo '-')
+
+          if [ "${FUNNEL_PUBLIC:-no}" = "yes" ]; then
+            MAIN_HOST="$FQ"; MAIN_PORT="10000"; MAIN_LABEL="Funnel عمومی (بدون نیاز به Tailscale)"
+          else
+            MAIN_HOST="$TS_IP"; MAIN_PORT="22"; MAIN_LABEL="Tailscale (پیشنهادی)"
+          fi
+
           {
             echo '# اطلاعات اتصال سرور'
             echo
-            echo '> این فایل با هر اجرای جدید به‌صورت خودکار به‌روز می‌شود.'
+            echo '> با هر اجرای جدید خودکار به‌روز می‌شود.'
             echo
             echo '| مورد | مقدار |'
             echo '|---|---|'
             echo "| آخرین به‌روزرسانی | $(date -u '+%Y-%m-%d %H:%M:%S') UTC |"
-            echo "| کاربر SSH | root |"
-            echo "| پسورد SSH | \`$ROOT_PASS\` |"
+            echo "| کاربر / پسورد | \`root\` / \`$ROOT_PASS\` |"
+            echo "| کاربر پشتیبان | \`hamid\` / \`$ROOT_PASS\` (با sudo) |"
             echo "| IP داخل Tailscale | \`$TS_IP\` |"
-            echo "| نام گره | \`$HOSTNAME_TS\` / \`$FQ\` |"
-            echo "| Exit node | $EXITN |"
-            echo "| Funnel | $FUNS |"
-            echo "| تست ورود SSH با پسورد | $SSHTEST |"
-            echo "| تست SSH روی پورت ۱۰۰۰۰ (داخل tailnet) | $P10000 |"
+            echo "| نام گره | \`$HOSTNAME_TS\` = \`$FQ\` |"
+            echo "| Exit node | $EX |"
+            echo "| Funnel | $FU |"
+            echo "| تست ورود root با پسورد | $RT |"
+            echo "| تست ورود hamid با پسورد | $HT |"
             echo "| پایان تقریبی این اجرا | $ENDT UTC |"
             echo
-            echo '## راه اول — از طریق Tailscale (پیشنهادی)'
+            echo "## راه اصلی — $MAIN_LABEL"
             echo '```bash'
-            echo "ssh root@$TS_IP"
+            echo "ssh -p $MAIN_PORT root@$MAIN_HOST"
             echo '```'
             echo
-            echo '## راه دوم — SSH روی پورت ۱۰۰۰۰ (serve/funnel)'
+            echo '## همهٔ راه‌ها'
             echo '```bash'
+            echo "# ۱) از طریق Tailscale (پیشنهادی)"
+            echo "ssh root@$TS_IP"
+            echo "ssh hamid@$TS_IP        # سپس: sudo -i"
+            echo
+            echo "# ۲) از طریق پورت ۱۰۰۰۰ (serve/funnel)"
             echo "ssh -p 10000 -o StrictHostKeyChecking=no root@$FQ"
             echo '```'
             echo "صفحهٔ وضعیت: https://$FQ:8443/"
             echo
             echo '## Exit node روی گوشی'
-            echo "در اپ Tailscale، منو → Exit node → \`$HOSTNAME_TS\` را انتخاب کنید."
-            echo
-            echo '> نکته: اگر Funnel «فقط داخل tailnet» است، باید در کنسول ادمین Tailscale'
-            echo '> (بخش DNS) گزینهٔ **HTTPS Certificates** یک‌بار فعال شود.'
+            echo "اپ Tailscale → منو → Exit node → \`$HOSTNAME_TS\`"
           } > /tmp/CONNECTION.md
           cat /tmp/CONNECTION.md
-          B64=$(base64 -w0 /tmp/CONNECTION.md)
-          SHA=$(curl -s -m 20 -H "Authorization: token $PAT" \
-            "https://api.github.com/repos/${{ github.repository }}/contents/CONNECTION.md" | jq -r '.sha // empty')
-          [ -n "$SHA" ] && EXTRA=",\"sha\":\"$SHA\"" || EXTRA=""
-          curl -s -m 30 -o /dev/null -w 'publish CONNECTION.md -> HTTP %{http_code}\n' -X PUT \
-            -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/contents/CONNECTION.md" \
-            -d "{\"message\":\"update connection info\",\"content\":\"$B64\",\"branch\":\"main\"$EXTRA}"
+
+          # گزارش تشخیصی
+          {
+            echo '# گزارش تشخیصی'
+            echo
+            echo '```'
+            echo "date: $(date -u)"
+            echo "-- sshd -T --"
+            sudo sshd -T 2>&1 | grep -Ei '^(permitrootlogin|passwordauthentication|kbdinteractive|usepam|authenticationmethods|allowusers|denyusers) ' | sort
+            echo "-- passwd -S --"
+            sudo passwd -S root 2>&1; sudo passwd -S hamid 2>&1
+            echo "-- تست root --"; echo "$A"
+            echo "-- تست hamid --"; echo "$B"
+            echo "-- hash پسورد (باید با $ شروع شود، نه ! یا *) --"
+            echo "root: $(sudo getent shadow root | cut -d: -f2 | cut -c1-4)"
+            echo "hamid: $(sudo getent shadow hamid | cut -d: -f2 | cut -c1-4)"
+            echo "-- pam.d/sshd --"
+            sudo grep -vE '^\s*(#|$)' /etc/pam.d/sshd 2>&1 | head -12
+            echo "-- pam.d/common-auth --"
+            sudo grep -vE '^\s*(#|$)' /etc/pam.d/common-auth 2>&1 | head -12
+            echo "-- پروسه‌های sshd --"
+            ps -eo pid,args | grep -E '[s]shd' | head -5
+            echo "-- لاگ sshd --"
+            sudo tail -25 /tmp/sshd.log 2>&1
+            echo "-- auth.log --"
+            sudo tail -18 /var/log/auth.log 2>&1 | tail -12
+            echo "-- ts status --"
+            sudo ts status 2>&1 | head -8
+            echo "-- tags --"
+            sudo ts status --json 2>&1 | jq -c '{Tags:.Self.Tags,DNSName:.Self.DNSName,Online:.Self.Online}' 2>&1
+            echo "-- serve status --"
+            sudo ts serve status 2>&1 | head -20
+            echo "-- funnel status --"
+            sudo ts funnel status 2>&1 | head -20
+            echo "-- resolve عمومی --"
+            getent hosts "$FQ" 2>&1 || echo NXDOMAIN
+            echo '```'
+          } > /tmp/DIAG.md
+
+          publish() {
+            f="$1"; name="$2"
+            b64=$(base64 -w0 "$f")
+            sha=$(curl -s -m 20 -H "Authorization: token $PAT" \
+              "https://api.github.com/repos/${{ github.repository }}/contents/$name" | jq -r '.sha // empty')
+            [ -n "$sha" ] && ex=",\"sha\":\"$sha\"" || ex=""
+            curl -s -m 30 -o /dev/null -w "publish $name -> HTTP %{http_code}\n" -X PUT \
+              -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/contents/$name" \
+              -d "{\"message\":\"update $name\",\"content\":\"$b64\",\"branch\":\"main\"$ex}"
+          }
+          publish /tmp/CONNECTION.md CONNECTION.md
+          publish /tmp/DIAG.md DIAG.md
+          exit 0
 
       - name: keep-alive
         timeout-minutes: 355
         env:
           TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
+          set +e +o pipefail
           TOTAL="${{ github.event.inputs.minutes }}"
           [ -z "$TOTAL" ] && TOTAL=350
           CHAIN="${{ github.event.inputs.chain }}"
@@ -436,9 +400,11 @@ jobs:
             if ! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/; then
               (cd /tmp/status && nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &)
               sleep 2
-              timeout 60 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/dev/null 2>&1 || true
-              timeout 60 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on >/dev/null 2>&1 || true
-              echo "[$(date -u +%H:%M)] http/serve/funnel بازیابی شد"
+              echo "[$(date -u +%H:%M)] سرویس وب بازیابی شد"
+            fi
+            if ! sudo ts funnel status 2>&1 | grep -q ':10000'; then
+              sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/dev/null 2>&1
+              echo "[$(date -u +%H:%M)] forward پورت ۱۰۰۰۰ بازیابی شد"
             fi
             echo "[$(date -u +%H:%M)] alive | ts=$(sudo ts ip -4 2>/dev/null | head -1) | sshd=$(pgrep -c sshd 2>/dev/null || echo 0)"
             sleep 60
@@ -457,3 +423,4 @@ jobs:
           else
             echo "chain غیرفعال است."
           fi
+          exit 0
