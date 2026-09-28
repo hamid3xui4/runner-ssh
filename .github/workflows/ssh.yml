@@ -68,12 +68,30 @@ jobs:
           grep -rniE 'passwordauthentication|permitrootlogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ || true
           echo "=== وضعیت حساب root ==="
           sudo passwd -S root || true
-          sudo pkill -x sshd || true
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -t && echo "sshd config test: OK"
+          start_sshd() {
+            sudo bash -c 'nohup /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &'
+            sleep 2
+          }
+          if ss -ltn | grep -qE ':22\s'; then
+            echo "پورت 22 از قبل در حال گوش‌دادن است"
+          else
+            start_sshd
+          fi
+          if ! ss -ltn | grep -qE ':22\s'; then
+            echo "--- sshd بالا نیامد؛ لاگ: ---"
+            sudo tail -30 /tmp/sshd.log || true
+            echo "--- تلاش دوم پس از آزادسازی پورت ---"
+            sudo pkill -x sshd || true
+            sleep 2
+            start_sshd
+          fi
           sleep 1
-          sudo /usr/sbin/sshd -D -e 2>/tmp/sshd.log &
-          sleep 3
           echo "sshd processes: $(pgrep -c sshd || echo 0)"
           ss -ltn | grep -E ':22\s' && echo PORT22_OK
+          echo "--- آخرین خطوط لاگ sshd ---"
+          sudo tail -8 /tmp/sshd.log || true
 
       - name: setup-tailscale
         timeout-minutes: 8
@@ -150,6 +168,10 @@ jobs:
 
           say "### 2) ورود SSH با پسورد روی loopback"
           SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1"
+          for t in 1 2 3 4 5 6; do
+            sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 true 2>/dev/null && break
+            sleep 3
+          done
           if sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK $(whoami) | $(lsb_release -ds)' 2>/tmp/ssherr.txt; then
             say OK2
           else
@@ -278,8 +300,9 @@ jobs:
               sudo -E ts up --authkey="$TSKEY" --hostname="$HOSTNAME_TS" --reset --advertise-exit-node --accept-dns=false >/dev/null 2>&1
               echo "[$(date -u +%H:%M)] tailscaled بازیابی شد"
             fi
-            if ! pgrep -x sshd >/dev/null; then
-              sudo /usr/sbin/sshd -D -e 2>>/tmp/sshd.log & sleep 2
+            if ! ss -ltn | grep -qE ':22\s'; then
+              sudo bash -c 'nohup /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &'
+              sleep 2
               echo "[$(date -u +%H:%M)] sshd بازیابی شد"
             fi
             if ! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/; then
