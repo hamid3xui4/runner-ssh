@@ -1,0 +1,110 @@
+name: diag-funnel
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: diag-funnel
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  diag:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: diagnose-funnel
+        timeout-minutes: 9
+        env:
+          TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          TSAPI: ${{ secrets.TAILSCALE_API_TOKEN }}
+          PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set +e +o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -qq install -y curl jq >/dev/null
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+          sudo mkdir -p /var/run/tailscale /var/lib/tailscale
+          printf '#!/bin/bash\nexec tailscale --socket=/var/run/tailscale/tailscaled.sock "$@"\n' | sudo tee /usr/local/bin/ts >/dev/null
+          sudo chmod +x /usr/local/bin/ts
+          sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock \
+               --statedir=/var/lib/tailscale >/tmp/td.log 2>&1 &
+          for i in $(seq 1 25); do sudo ts status >/dev/null 2>&1 && break; sleep 1; done
+          HN="diag-$(date +%s | tail -c 6)"
+          sudo -E ts up --authkey="$TSKEY" --hostname="$HN" --accept-dns=false 2>&1 | tail -3
+          sleep 3
+          FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
+          IP=$(sudo ts ip -4 | head -1)
+
+          {
+            echo '# گزارش تشخیص Funnel'
+            echo
+            echo '```'
+            echo "date: $(date -u)"
+            echo "hostname: $HN"
+            echo "fqdn: $FQ"
+            echo "ts ip: $IP"
+            echo "tailscale version: $(tailscale version | head -1)"
+            echo
+            echo "=====Self JSON (tags/caps)====="
+            sudo ts status --json 2>&1 | jq '.Self | {DNSName,Tags,CapabilityVersion,Online,Owner,HostName,KeyExpiry}' 2>&1
+            echo
+            echo "=====device info از API====="
+            DID=$(curl -s -m 25 -u "$TSAPI:" "https://api.tailscale.com/api/v2/tailnet/-/devices" \
+                  | jq -r --arg h "$HN" '.devices[]? | select(.hostname==$h) | .id')
+            echo "device id: $DID"
+            curl -s -m 25 -u "$TSAPI:" "https://api.tailscale.com/api/v2/device/$DID?fields=all" \
+              | jq '{hostname,tags,effectiveTags,user,authorized,isEphemeral,blocksIncomingConnections}' 2>&1
+            echo
+            echo "=====ACL فعلی====="
+            curl -s -m 25 -u "$TSAPI:" "https://api.tailscale.com/api/v2/tailnet/-/acl" 2>&1 | jq '{nodeAttrs,autoApprovers,tagOwners}' 2>&1
+            echo
+            echo "=====تلاش ۱: funnel --bg --yes --https=443 (پورت پیش‌فرض)====="
+            (cd /tmp && printf 'hello funnel' > f.html)
+            timeout 90 sudo ts funnel --bg --yes 443 /tmp/f.html 2>&1 | tail -15
+            echo "rc=$?"
+            echo
+            echo "=====تلاش ۲: funnel --bg --yes --https=8443 URL====="
+            nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/h.log 2>&1 &
+            sleep 2
+            timeout 90 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 2>&1 | tail -15
+            echo "rc=$?"
+            echo
+            echo "=====تلاش ۳: funnel --bg --tls-terminated-tcp=10000 (بدون --yes)====="
+            timeout 90 sudo ts funnel --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -15
+            echo "rc=$?"
+            echo
+            echo "=====تلاش ۴: funnel بدون --bg (۲۰ ثانیه)====="
+            timeout 20 sudo ts funnel --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -20
+            echo "rc=$?"
+            echo
+            echo "=====funnel status --json====="
+            sudo ts funnel status --json 2>&1 | head -60
+            echo
+            echo "=====serve status====="
+            sudo ts serve status 2>&1 | head -20
+            echo
+            echo "=====تست واقعی از بیرون (curl)====="
+            curl -s -m 20 -o /dev/null -w "https://$FQ:8443/ -> %{http_code}\n" "https://$FQ:8443/" 2>&1
+            curl -s -m 20 -o /dev/null -w "https://$FQ/ -> %{http_code}\n" "https://$FQ/" 2>&1
+            echo
+            echo "=====debug prefs====="
+            sudo ts debug prefs 2>&1 | jq '{ServeConfig: (.ServeConfig // null | if . == null then null else (.TCP // {} | keys), (.Web // {} | keys) end)}' 2>&1 | head -20
+            echo '```'
+          } > /tmp/DIAGF.md
+          cat /tmp/DIAGF.md | head -5
+          b64=$(base64 -w0 /tmp/DIAGF.md)
+          sha=$(curl -s -m 20 -H "Authorization: token $PAT" "https://api.github.com/repos/${{ github.repository }}/contents/DIAGF.md" | jq -r '.sha // empty')
+          [ -n "$sha" ] && ex=",\"sha\":\"$sha\"" || ex=""
+          curl -s -m 30 -o /dev/null -w 'publish DIAGF.md -> HTTP %{http_code}\n' -X PUT \
+            -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/DIAGF.md" \
+            -d "{\"message\":\"funnel diagnostics\",\"content\":\"$b64\",\"branch\":\"main\"$ex}"
+
+          # پاک‌کردن گرهٔ تشخیصی
+          curl -s -m 20 -o /dev/null -w "cleanup node -> %{http_code}\n" -X DELETE -u "$TSAPI:" "https://api.tailscale.com/api/v2/device/$DID"
+          exit 0
