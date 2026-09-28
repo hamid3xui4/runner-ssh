@@ -1,33 +1,35 @@
 # اطلاعات اتصال سرور
 
-> این فایل با هر اجرای جدید به‌صورت خودکار به‌روز می‌شود.
+> با هر اجرای جدید خودکار به‌روز می‌شود.
 
 | مورد | مقدار |
 |---|---|
-| آخرین به‌روزرسانی | 2026-09-28 10:16:02 UTC |
-| کاربر SSH | root |
-| پسورد SSH | `hamidgh69` |
-| IP داخل Tailscale | `100.96.62.11` |
-| نام گره | `gha-ubuntu` / `gha-ubuntu.tail3641f4.ts.net` |
+| آخرین به‌روزرسانی | 2026-09-28 10:31:02 UTC |
+| کاربر / پسورد | `root` / `hamidgh69` |
+| کاربر پشتیبان | `hamid` / `hamidgh69` (با sudo) |
+| IP داخل Tailscale | `100.125.72.20` |
+| نام گره | `gha-ubuntu` = `gha-ubuntu.tail3641f4.ts.net` |
 | Exit node | فعال ✅ |
 | Funnel | فقط داخل tailnet ⚠️ |
-| تست ورود SSH با پسورد | ناموفق ❌ |
-| تست SSH روی پورت ۱۰۰۰۰ (داخل tailnet) | ناموفق ❌ |
-| پایان تقریبی این اجرا | 15:58 UTC |
+| تست ورود root با پسورد | موفق ✅ |
+| تست ورود hamid با پسورد | موفق ✅ |
+| پایان تقریبی این اجرا | 16:13 UTC |
 
-## راه اول — از طریق Tailscale (پیشنهادی)
+## راه اصلی — Tailscale (پیشنهادی)
 ```bash
-ssh root@100.96.62.11
+ssh -p 22 root@100.125.72.20
 ```
 
-## راه دوم — SSH روی پورت ۱۰۰۰۰ (serve/funnel)
+## همهٔ راه‌ها
 ```bash
+# ۱) از طریق Tailscale (پیشنهادی)
+ssh root@100.125.72.20
+ssh hamid@100.125.72.20        # سپس: sudo -i
+
+# ۲) از طریق پورت ۱۰۰۰۰ (serve/funnel)
 ssh -p 10000 -o StrictHostKeyChecking=no root@gha-ubuntu.tail3641f4.ts.net
 ```
 صفحهٔ وضعیت: https://gha-ubuntu.tail3641f4.ts.net:8443/
 
 ## Exit node روی گوشی
-در اپ Tailscale، منو → Exit node → `gha-ubuntu` را انتخاب کنید.
-
-> نکته: اگر Funnel «فقط داخل tailnet» است، باید در کنسول ادمین Tailscale
-> (بخش DNS) گزینهٔ **HTTPS Certificates** یک‌بار فعال شود.
+اپ Tailscale → منو → Exit node → `gha-ubuntu`
