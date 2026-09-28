@@ -20,7 +20,6 @@ concurrency:
 
 env:
   HOSTNAME_TS: gha-ubuntu
-  TS_SOCKET: /var/run/tailscale/tailscaled.sock
 
 jobs:
   runner:
@@ -40,23 +39,41 @@ jobs:
           sudo mkdir -p /run/sshd
           echo "root:$ROOT_PASS" | sudo chpasswd
           sudo passwd -u root >/dev/null 2>&1 || true
-          if [ -n "$PUBKEY" ]; then
-            sudo mkdir -p /root/.ssh
-            echo "$PUBKEY" | sudo tee -a /root/.ssh/authorized_keys >/dev/null
-            sudo chmod 700 /root/.ssh && sudo chmod 600 /root/.ssh/authorized_keys
+          if [ -n "${PUBKEY:-}" ]; then
+            sudo install -d -m 700 /root/.ssh
+            echo "$PUBKEY" | sudo tee /root/.ssh/authorized_keys >/dev/null
+            sudo chmod 600 /root/.ssh/authorized_keys
           fi
-          for k in PermitRootLogin PasswordAuthentication PubkeyAuthentication UsePAM X11Forwarding; do
-            sudo sed -i "s/^#\?$k.*/$k yes/" /etc/ssh/sshd_config
-          done
-          sudo sed -i 's/^#\?ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?ClientAliveCountMax.*/ClientAliveCountMax 100/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?MaxSessions.*/MaxSessions 50/' /etc/ssh/sshd_config
-          { echo 'PermitRootLogin yes'; echo 'PasswordAuthentication yes'; } | sudo tee -a /etc/ssh/sshd_config >/dev/null
+          # OpenSSH اولین مقدار را می‌پذیرد و Include اول فایل است -> drop-in با پیشوند 00
+          sudo mkdir -p /etc/ssh/sshd_config.d
+          sudo tee /etc/ssh/sshd_config.d/00-runner.conf >/dev/null <<'EOF'
+          PermitRootLogin yes
+          PasswordAuthentication yes
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          UsePAM yes
+          X11Forwarding yes
+          MaxSessions 50
+          ClientAliveInterval 60
+          ClientAliveCountMax 1000
+          EOF
+          sudo sed -i 's/^          //' /etc/ssh/sshd_config.d/00-runner.conf
+          grep -q '^Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config \
+            || echo 'Include /etc/ssh/sshd_config.d/*.conf' | sudo tee -a /etc/ssh/sshd_config >/dev/null
           sudo ssh-keygen -A >/dev/null
+          echo "=== تنظیمات مؤثر sshd ==="
+          sudo sshd -T 2>/dev/null | grep -Ei '^(permitrootlogin|passwordauthentication|usepam|kbdinteractiveauthentication|pubkeyauthentication) ' | sort
+          echo "=== فایل‌های sshd_config.d ==="
+          ls -la /etc/ssh/sshd_config.d/ || true
+          grep -rniE 'passwordauthentication|permitrootlogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ || true
+          echo "=== وضعیت حساب root ==="
+          sudo passwd -S root || true
+          sudo pkill -x sshd || true
+          sleep 1
           sudo /usr/sbin/sshd -D -e 2>/tmp/sshd.log &
-          sleep 2
-          echo "sshd processes: $(pgrep -c sshd)"
-          ss -ltn | grep -E ':22\s' && echo "PORT22_OK"
+          sleep 3
+          echo "sshd processes: $(pgrep -c sshd || echo 0)"
+          ss -ltn | grep -E ':22\s' && echo PORT22_OK
 
       - name: setup-tailscale
         timeout-minutes: 8
@@ -68,90 +85,96 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || true
           sudo mkdir -p /var/run/tailscale /var/lib/tailscale
-          sudo tee /usr/local/bin/ts >/dev/null <<'WRAP'
-          #!/bin/bash
-          exec tailscale --socket=/var/run/tailscale/tailscaled.sock "$@"
-          WRAP
+          printf '#!/bin/bash\nexec tailscale --socket=/var/run/tailscale/tailscaled.sock "$@"\n' \
+            | sudo tee /usr/local/bin/ts >/dev/null
           sudo chmod +x /usr/local/bin/ts
+          sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
-          # پاک‌کردن گرهٔ خاموشِ هم‌نام تا نام و IP ثابت بماند
           if [ -n "$TSAPI" ]; then
-            for id in $(curl -s -m 25 -u "$TSAPI:" \
-              "https://api.tailscale.com/api/v2/tailnet/-/devices" \
+            for id in $(curl -s -m 25 -u "$TSAPI:" "https://api.tailscale.com/api/v2/tailnet/-/devices" \
               | jq -r --arg h "$HOSTNAME_TS" '.devices[]? | select(.hostname==$h and .connectedToControl==false) | .id'); do
-              code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X DELETE -u "$TSAPI:" \
-                "https://api.tailscale.com/api/v2/device/$id")
-              echo "delete old node $id -> $code"
+              echo "delete old node $id -> $(curl -s -m 20 -o /dev/null -w '%{http_code}' -X DELETE -u "$TSAPI:" "https://api.tailscale.com/api/v2/device/$id")"
             done
           fi
 
           sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock \
-               --statedir=/var/lib/tailscale > /tmp/tailscaled.log 2>&1 &
+               --statedir=/var/lib/tailscale >/tmp/tailscaled.log 2>&1 &
           for i in $(seq 1 25); do sudo ts status >/dev/null 2>&1 && break; sleep 1; done
-
           sudo -E ts up --authkey="$TSKEY" --hostname="$HOSTNAME_TS" --reset \
-               --advertise-exit-node --accept-routes=false --accept-dns=false --ssh=false
+               --advertise-exit-node --accept-routes=false --accept-dns=false
           sleep 3
           TS_IP=$(sudo ts ip -4 | head -1)
-          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
-          echo "FQDN=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')" >> "$GITHUB_ENV"
-          echo "TAILSCALE IP = $TS_IP"
-          sudo ts status | head -5 || true
+          FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
+          { echo "TS_IP=$TS_IP"; echo "FQDN=$FQ"; } >> "$GITHUB_ENV"
+          echo "TAILSCALE IP = $TS_IP   FQDN = $FQ"
+          echo "--- وضعیت گره‌ها ---"
+          sudo ts status | head -8 || true
+          echo "--- exit node ---"
+          sudo ts status --self 2>&1 | head -5 || true
 
       - name: setup-funnel
         timeout-minutes: 8
         run: |
           mkdir -p /tmp/status && cd /tmp/status
-          cat > index.html <<HTML
-          <!doctype html><meta charset="utf-8"><title>runner status</title>
-          <h1>Ubuntu 22.04 runner</h1><pre>host: $(hostname)
-          tailscale ip: ${TS_IP:-n/a}
-          updated: $(date -u)
-          </pre>
-          HTML
+          printf '<!doctype html><meta charset=utf-8><title>runner</title><h1>Ubuntu 22.04 runner</h1><pre>host: %s\nts ip: %s\ntime: %s</pre>\n' \
+            "$(hostname)" "${TS_IP:-n/a}" "$(date -u)" > index.html
           nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
           sleep 2
 
-          echo "--- serve config (با --bg تا مرحله بلوکه نشود) ---"
-          timeout 90 sudo ts serve --bg --https=8443 --set-path / http://127.0.0.1:8080 2>&1 | tail -3 || echo "serve-8443 failed"
-          timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -5 || echo "serve-10000 failed"
-          echo "--- funnel on ---"
-          timeout 90 sudo ts funnel --yes 8443 on 2>&1 | tail -6 || echo "funnel-8443 failed"
-          timeout 90 sudo ts funnel --yes 10000 on 2>&1 | tail -8 || echo "funnel-10000 failed"
+          echo "=== serve (داخل tailnet) ==="
+          timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 2>&1 | tail -3 || echo "serve-8443 failed"
+          timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -4 || echo "serve-10000 failed"
+
+          echo "=== funnel (روی اینترنت عمومی) ==="
+          timeout 90 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 on 2>&1 | tail -8 || echo "funnel-8443 failed"
+          timeout 90 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on 2>&1 | tail -10 || echo "funnel-10000 failed"
           sleep 3
-          echo "--- serve status ---"
+          echo "=== serve status ==="
           sudo ts serve status 2>&1 | head -25 || true
-          echo "--- funnel status ---"
+          echo "=== funnel status ==="
           sudo ts funnel status 2>&1 | head -25 || true
-          FQDN=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
-          echo "FQDN=$FQDN" >> "$GITHUB_ENV"
-          echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@$FQDN" >> "$GITHUB_ENV"
-          echo "FUNNEL_WEB=https://$FQDN:8443/" >> "$GITHUB_ENV"
+          echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@${FQDN}" >> "$GITHUB_ENV"
+          echo "FUNNEL_WEB=https://${FQDN}:8443/" >> "$GITHUB_ENV"
 
       - name: self-check
-        timeout-minutes: 5
+        continue-on-error: true
+        timeout-minutes: 6
         env:
           ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
         run: |
           R=0
-          echo "### 1) port 22"
-          ss -ltn | grep -E ':22\s' && echo OK1 || { echo FAIL1; R=1; }
-          echo "### 2) ورود SSH با پسورد (loopback)"
-          if sshpass -p "$ROOT_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-              root@127.0.0.1 'echo LOGIN_OK $(whoami) $(lsb_release -ds)' 2>/dev/null; then echo OK2; else echo FAIL2; R=2; fi
-          echo "### 3) tailscale"
-          sudo ts ip -4 | head -1 && echo OK3 || { echo FAIL3; R=3; }
-          echo "### 4) exit-node"
-          ADV=$(sudo ts status --json | jq -r '.Self.PrimaryRoutes // [] | join(",")')
-          echo "advertised routes: $ADV"
-          case "$ADV" in *0.0.0.0/0*) echo OK4;; *) echo "WARN4 (exit-node در فهرست نیست)";; esac
-          echo "### 5) funnel"
-          if sudo ts funnel status 2>&1 | grep -qiE 'https://|10000'; then echo OK5; else echo "WARN5"; fi
-          echo "### 6) تست funnel از راه دور"
-          FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
-          code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "https://$FQ:8443/" || echo 000)
-          echo "web  https://$FQ:8443/  -> $code"
+          say() { echo "$@"; }
+          say "### 1) port 22"
+          ss -ltn | grep -E ':22\s' >/dev/null && say OK1 || { say FAIL1; R=1; }
+
+          say "### 2) ورود SSH با پسورد روی loopback"
+          SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1"
+          if sshpass -p "$ROOT_PASS" ssh $SSHOPTS root@127.0.0.1 'echo LOGIN_OK $(whoami) | $(lsb_release -ds)' 2>/tmp/ssherr.txt; then
+            say OK2
+          else
+            say FAIL2
+            say "--- خطای کلاینت ---"; cat /tmp/ssherr.txt | tail -10
+            say "--- لاگ sshd ---"; sudo tail -25 /tmp/sshd.log || true
+            say "--- ssh -v ---"; sshpass -p "$ROOT_PASS" ssh -v $SSHOPTS root@127.0.0.1 true 2>&1 | grep -iE 'authenticat|password|denied|method' | tail -12 || true
+            R=2
+          fi
+
+          say "### 3) tailscale ip"
+          sudo ts ip -4 | head -1 && say OK3 || { say FAIL3; R=3; }
+
+          say "### 4) exit node"
+          if sudo ts status --peers 2>&1 | grep -qi 'offers exit node' || sudo ts status 2>&1 | grep -q 'offers exit node'; then
+            say "OK4 - exit node تبلیغ می‌شود"
+          else
+            say "WARN4"; sudo ts status 2>&1 | head -6 || true
+          fi
+
+          say "### 5) serve/funnel config"
+          sudo ts funnel status 2>&1 | head -12 || true
+          sudo ts funnel status 2>&1 | grep -qi 'available on the internet\|funnel' && say "OK5 - funnel فعال" || say "WARN5 - funnel فقط داخل tailnet"
+
+          say "### 6) تست پورت 10000 روی IP داخلی tailscale"
           cat > /tmp/probe.py <<'PY'
           import socket, ssl, sys
           host, port = sys.argv[1], int(sys.argv[2])
@@ -159,27 +182,27 @@ jobs:
               try:
                   s = socket.create_connection((host, port), timeout=15)
                   if mode == "tls":
-                      ctx = ssl.create_default_context()
-                      ctx.check_hostname = False
-                      ctx.verify_mode = ssl.CERT_NONE
+                      ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
                       s = ctx.wrap_socket(s, server_hostname=host)
                   s.settimeout(15)
-                  banner = s.recv(120).decode(errors="replace").strip()
-                  s.close()
-                  if banner:
-                      print(f"{mode.upper()}-OK banner={banner}")
-                      sys.exit(0)
+                  b = s.recv(120).decode(errors="replace").strip(); s.close()
+                  if b:
+                      print(mode.upper() + "-OK banner=" + b); sys.exit(0)
               except Exception as e:
-                  print(f"{mode} failed: {type(e).__name__}: {e}")
-          print("NO-BANNER")
-          sys.exit(1)
+                  print(mode + " failed: " + type(e).__name__ + ": " + str(e))
+          print("NO-BANNER"); sys.exit(1)
           PY
-          echo "--- تست SSH از طریق funnel (پورت 10000) ---"
-          python3 /tmp/probe.py "$FQ" 10000 || echo "funnel-ssh نه از بیرون تأیید نشد"
-          echo "--- تست SSH روی IP داخلی tailscale ---"
-          python3 /tmp/probe.py "$(sudo ts ip -4 | head -1)" 22 || true
+          python3 /tmp/probe.py "$TS_IP" 10000 || say "WARN6"
+
+          say "### 7) تست از طریق نام عمومی funnel"
+          say "DNS: $(getent hosts "$FQDN" | head -1 || echo 'حل نشد')"
+          timeout 40 python3 /tmp/probe.py "$FQDN" 10000 || say "WARN7 - funnel عمومی هنوز در دسترس نیست"
+          code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "https://$FQDN:8443/" || echo 000)
+          say "web https://$FQDN:8443/ -> $code"
+
+          say "### جمع‌بندی"
+          if [ "$R" = "0" ]; then say "ALL_CORE_TESTS_PASSED"; else say "CORE_FAILURE_AT_STEP_$R"; fi
           echo "CHECK_RESULT=$R" >> "$GITHUB_ENV"
-          echo "==== جمع‌بندی: $([ "$R" = 0 ] && echo 'همه تست‌ها موفق' || echo 'خطا در تست شمارهٔ '$R') ===="
 
       - name: publish-info
         timeout-minutes: 3
@@ -189,50 +212,52 @@ jobs:
         run: |
           TS_IP=$(sudo ts ip -4 | head -1)
           FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
-          ADV=$(sudo ts status --json | jq -r '.Self.PrimaryRoutes // [] | join(", ")')
-          RUN_END=$(date -u -d "+$(( ${TOTAL_MIN:-350} )) minutes" +%H:%M 2>/dev/null || echo "-")
-          cat > /tmp/CONNECTION.md <<EOF
-          # اطلاعات اتصال سرور
-
-          > این فایل به‌صورت خودکار در هر اجرای جدید به‌روز می‌شود.
-
-          | مورد | مقدار |
-          |---|---|
-          | به‌روزرسانی | $(date -u '+%Y-%m-%d %H:%M:%S') UTC |
-          | کاربر SSH | \`root\` |
-          | پسورد SSH | \`$ROOT_PASS\` |
-          | IP داخل Tailscale | \`$TS_IP\` |
-          | نام کامل گره | \`$FQ\` |
-          | exit-node | $(case "$ADV" in *0.0.0.0/0*) echo 'فعال ✅';; *) echo 'غيرفعال ❌';; esac) ($ADV) |
-          | پایان تقریبی این اجرا | $RUN_END UTC |
-
-          ## راه اول — از طریق Tailscale (پیشنهادی)
-          \`\`\`bash
-          ssh root@$TS_IP
-          \`\`\`
-
-          ## راه دوم — از طریق Funnel (بدون نیاز به Tailscale، از هر اینترنتی)
-          \`\`\`bash
-          ssh -p 10000 -o StrictHostKeyChecking=no root@$FQ
-          \`\`\`
-
-          صفحهٔ وضعیت عمومی: https://$FQ:8443/
-
-          ## exit node روی گوشی
-          در اپ Tailscale گزینهٔ Exit node را روی \`$HOSTNAME_TS\` بگذارید.
-          EOF
-          sed -i 's/^          //' /tmp/CONNECTION.md
+          EXITN=$(sudo ts status 2>&1 | grep -q 'offers exit node' && echo 'فعال ✅' || echo 'غيرفعال ❌')
+          FUNS=$(sudo ts funnel status 2>&1 | grep -qi 'internet' && echo 'عمومی ✅' || echo 'فقط داخل tailnet ⚠️')
+          TOTAL="${{ github.event.inputs.minutes }}"; [ -z "$TOTAL" ] && TOTAL=350
+          NOW=$(date +%s); ENDT=$(date -u -d "@$(( NOW + (TOTAL-8)*60 ))" '+%H:%M' 2>/dev/null || echo '-')
+          {
+            echo '# اطلاعات اتصال سرور'
+            echo
+            echo '> این فایل با هر اجرای جدید به‌صورت خودکار به‌روز می‌شود.'
+            echo
+            echo '| مورد | مقدار |'
+            echo '|---|---|'
+            echo "| آخرین به‌روزرسانی | $(date -u '+%Y-%m-%d %H:%M:%S') UTC |"
+            echo "| کاربر SSH | root |"
+            echo "| پسورد SSH | \`$ROOT_PASS\` |"
+            echo "| IP داخل Tailscale | \`$TS_IP\` |"
+            echo "| نام گره | \`$HOSTNAME_TS\` / \`$FQ\` |"
+            echo "| Exit node | $EXITN |"
+            echo "| Funnel | $FUNS |"
+            echo "| پایان تقریبی این اجرا | $ENDT UTC |"
+            echo
+            echo '## راه اول — از طریق Tailscale (پیشنهادی)'
+            echo '```bash'
+            echo "ssh root@$TS_IP"
+            echo '```'
+            echo
+            echo '## راه دوم — SSH روی پورت ۱۰۰۰۰ (serve/funnel)'
+            echo '```bash'
+            echo "ssh -p 10000 -o StrictHostKeyChecking=no root@$FQ"
+            echo '```'
+            echo "صفحهٔ وضعیت: https://$FQ:8443/"
+            echo
+            echo '## Exit node روی گوشی'
+            echo "در اپ Tailscale، منو → Exit node → \`$HOSTNAME_TS\` را انتخاب کنید."
+            echo
+            echo '> نکته: اگر Funnel «فقط داخل tailnet» است، باید در کنسول ادمین Tailscale'
+            echo '> (بخش DNS) گزینهٔ **HTTPS Certificates** یک‌بار فعال شود.'
+          } > /tmp/CONNECTION.md
+          cat /tmp/CONNECTION.md
           B64=$(base64 -w0 /tmp/CONNECTION.md)
           SHA=$(curl -s -m 20 -H "Authorization: token $PAT" \
             "https://api.github.com/repos/${{ github.repository }}/contents/CONNECTION.md" | jq -r '.sha // empty')
-          if [ -n "$SHA" ]; then EXTRA=",\"sha\":\"$SHA\""; else EXTRA=""; fi
+          [ -n "$SHA" ] && EXTRA=",\"sha\":\"$SHA\"" || EXTRA=""
           curl -s -m 30 -o /dev/null -w 'publish CONNECTION.md -> HTTP %{http_code}\n' -X PUT \
             -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/contents/CONNECTION.md" \
             -d "{\"message\":\"update connection info\",\"content\":\"$B64\",\"branch\":\"main\"$EXTRA}"
-          echo "================ اطلاعات اتصال ================"
-          cat /tmp/CONNECTION.md | head -30
-          echo "==============================================="
 
       - name: keep-alive
         timeout-minutes: 355
@@ -245,25 +270,39 @@ jobs:
           [ -z "$CHAIN" ] && CHAIN=yes
           LIFE=$(( TOTAL - 8 ))
           ENDS=$(( $(date +%s) + LIFE*60 ))
-          echo "سرور تا $LIFE دقیقه زنده می‌ماند، سپس رانر بعدی راه می‌افتد (chain=$CHAIN)."
+          echo "این رانر $LIFE دقیقه زنده می‌ماند و سپس رانر بعدی را راه می‌اندازد (chain=$CHAIN)."
           while [ "$(date +%s)" -lt "$ENDS" ]; do
-            pgrep -x tailscaled >/dev/null || { sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock --statedir=/var/lib/tailscale >/tmp/tailscaled.log 2>&1 & sleep 3; sudo -E ts up --authkey="$TSKEY" --hostname="$HOSTNAME_TS" --reset --advertise-exit-node --accept-dns=false >/dev/null 2>&1; echo "[$(date -u +%H:%M)] tailscaled دوباره راه‌اندازی شد"; }
-            pgrep -x sshd >/dev/null || { sudo /usr/sbin/sshd -D -e & sleep 1; echo "[$(date -u +%H:%M)] sshd دوباره راه‌اندازی شد"; }
-            curl -s -m 3 -o /dev/null http://127.0.0.1:8080/ || { (cd /tmp/status && nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &) ; sleep 2; timeout 60 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/dev/null 2>&1; timeout 60 sudo ts funnel --yes 10000 on >/dev/null 2>&1; timeout 60 sudo ts funnel --yes 8443 on >/dev/null 2>&1; echo "[$(date -u +%H:%M)] http/serve/funnel بازیابی شد"; }
+            if ! pgrep -x tailscaled >/dev/null; then
+              sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock --statedir=/var/lib/tailscale >/tmp/tailscaled.log 2>&1 &
+              sleep 4
+              sudo -E ts up --authkey="$TSKEY" --hostname="$HOSTNAME_TS" --reset --advertise-exit-node --accept-dns=false >/dev/null 2>&1
+              echo "[$(date -u +%H:%M)] tailscaled بازیابی شد"
+            fi
+            if ! pgrep -x sshd >/dev/null; then
+              sudo /usr/sbin/sshd -D -e 2>>/tmp/sshd.log & sleep 2
+              echo "[$(date -u +%H:%M)] sshd بازیابی شد"
+            fi
+            if ! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/; then
+              (cd /tmp/status && nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &)
+              sleep 2
+              timeout 60 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/dev/null 2>&1 || true
+              timeout 60 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on >/dev/null 2>&1 || true
+              echo "[$(date -u +%H:%M)] http/serve/funnel بازیابی شد"
+            fi
             echo "[$(date -u +%H:%M)] alive | ts=$(sudo ts ip -4 2>/dev/null | head -1) | sshd=$(pgrep -c sshd 2>/dev/null || echo 0)"
             sleep 60
           done
-          echo "پایان عمر این رانر — راه‌اندازی رانر بعدی"
+          echo "عمر این رانر تمام شد — راه‌اندازی رانر بعدی"
           if [ "$CHAIN" = "yes" ]; then
             for i in 1 2 3; do
               code=$(curl -s -m 25 -o /dev/null -w '%{http_code}' -X POST \
                 -H "Authorization: token ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
                 "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ssh.yml/dispatches" \
                 -d "{\"ref\":\"main\",\"inputs\":{\"minutes\":\"$TOTAL\",\"chain\":\"yes\"}}")
-              echo "dispatch attempt $i -> HTTP $code"
+              echo "dispatch تلاش $i -> HTTP $code"
               [ "$code" = "204" ] && break
               sleep 5
             done
           else
-            echo "chain غیرفعال است؛ رانر بعدی اجرا نمی‌شود."
+            echo "chain غیرفعال است."
           fi
