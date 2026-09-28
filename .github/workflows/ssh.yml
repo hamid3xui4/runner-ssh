@@ -132,6 +132,7 @@ jobs:
           sudo ts status --self 2>&1 | head -5 || true
 
       - name: setup-funnel
+        shell: bash
         timeout-minutes: 8
         run: |
           mkdir -p /tmp/status && cd /tmp/status
@@ -139,34 +140,40 @@ jobs:
             "$(hostname)" "${TS_IP:-n/a}" "$(date -u)" > index.html
           nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
           sleep 2
+          echo "tailscale version: $(tailscale version | head -1)"
 
-          echo "=== پاک‌کردن تنظیمات قبلی serve/funnel ==="
-          sudo ts funnel reset 2>&1 | tail -2 || true
-          sudo ts serve reset 2>&1 | tail -2 || true
+          echo "=== reset ==="
+          sudo ts funnel reset >/tmp/r1.log 2>&1; echo "rc-funnel-reset=$?"; tail -3 /tmp/r1.log
+          sudo ts serve reset  >/tmp/r2.log 2>&1; echo "rc-serve-reset=$?";  tail -3 /tmp/r2.log
           sleep 2
 
-          echo "=== funnel مستقیم (بدون serve) ==="
-          timeout 120 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 on >/tmp/f1.log 2>&1
-          echo "rc-8443=$?"; tail -12 /tmp/f1.log
-          timeout 120 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on >/tmp/f2.log 2>&1
-          echo "rc-10000=$?"; tail -14 /tmp/f2.log
+          echo "=== funnel help ==="
+          sudo ts funnel --help >/tmp/fh.log 2>&1; echo "rc-help=$?"; head -40 /tmp/fh.log
+
+          try() {
+            label="$1"; shift
+            out=$(timeout 100 sudo ts "$@" 2>&1); rc=$?
+            echo "----- $label (rc=$rc) -----"
+            echo "$out" | tail -12
+            return $rc
+          }
+
+          echo "=== web 8443 ==="
+          try "A funnel --bg --yes --https=8443 URL on" funnel --bg --yes --https=8443 http://127.0.0.1:8080 on ||           try "B funnel --bg --https=8443 URL on" funnel --bg --https=8443 http://127.0.0.1:8080 on ||           try "C funnel --bg --yes 8443 on" funnel --bg --yes 8443 on ||           try "D serve --bg --https=8443" serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 || echo "web setup failed"
+
+          echo "=== ssh 10000 ==="
+          try "E funnel --bg --yes --tls-terminated-tcp=10000 on" funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on ||           try "F funnel --bg --tls-terminated-tcp=10000 on" funnel --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on ||           try "G funnel --bg --yes --tcp=10000 on" funnel --bg --yes --tcp=10000 tcp://127.0.0.1:22 on ||           try "H serve --bg --tls-terminated-tcp=10000" serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 || echo "ssh-forward failed"
+
           sleep 4
-
-          echo "=== اگر funnel نشد، serve برای دسترسی داخل tailnet ==="
-          if ! sudo ts funnel status 2>&1 | grep -qi 'internet'; then
-            timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -3 || true
-            timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 2>&1 | tail -3 || true
-            echo "serve (tailnet-only) فعال شد"
-          fi
-          sleep 2
           echo "=== serve status ==="
-          sudo ts serve status 2>&1 | head -25 || true
+          sudo ts serve status 2>&1 | head -25
           echo "=== funnel status ==="
-          sudo ts funnel status 2>&1 | head -25 || true
-          echo "=== resolve عمومی نام گره ==="
-          getent hosts "$FQDN" 2>&1 || echo "public DNS: NXDOMAIN (funnel عمومی نشده)"
+          sudo ts funnel status 2>&1 | head -25
+          echo "=== resolve ==="
+          getent hosts "$FQDN" 2>&1 || echo "public DNS: NXDOMAIN"
           echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@${FQDN}" >> "$GITHUB_ENV"
           echo "FUNNEL_WEB=https://${FQDN}:8443/" >> "$GITHUB_ENV"
+          exit 0
 
       - name: self-check
         continue-on-error: true
@@ -240,7 +247,8 @@ jobs:
           echo "CHECK_RESULT=$R" >> "$GITHUB_ENV"
 
       - name: publish-info
-        timeout-minutes: 3
+        shell: bash
+        timeout-minutes: 4
         env:
           PAT: ${{ secrets.GH_PAT }}
           ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
