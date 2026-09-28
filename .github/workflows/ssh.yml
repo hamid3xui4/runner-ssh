@@ -172,7 +172,7 @@ jobs:
           exit 0
 
       - name: setup-funnel
-        timeout-minutes: 8
+        timeout-minutes: 10
         run: |
           set +e +o pipefail
           mkdir -p /tmp/status && cd /tmp/status
@@ -180,33 +180,55 @@ jobs:
             "$(hostname)" "${TS_IP:-n/a}" "$(date -u)" > index.html
           nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
           sleep 2
-          echo "tailscale: $(tailscale version | head -1)"
-          sudo ts funnel reset >/dev/null 2>&1
-          sudo ts serve reset >/dev/null 2>&1
-          sleep 2
+          sudo install -d -m 0755 /run/sshd
 
-          echo "=== FUNNEL: SSH روی پورت 10000 (TLS-terminated TCP) ==="
-          timeout 120 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -14
-          echo "rc=$?"
-          echo "=== FUNNEL: وب روی 8443 ==="
-          timeout 120 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 2>&1 | tail -12
-          echo "rc=$?"
-          sleep 4
+          echo "۱۰ ثانیه صبر تا گره در control plane پایدار شود"
+          sleep 10
 
-          FS=$(sudo ts funnel status 2>&1)
-          if ! echo "$FS" | grep -qi 'internet'; then
-            echo "funnel عمومی نشد -> فعال‌سازی serve برای دسترسی داخل tailnet"
-            timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -4
-            timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 2>&1 | tail -4
+          logf() { echo "----- $1 -----"; cat "$2" 2>/dev/null | tail -16; }
+
+          is_pub() { sudo ts funnel status 2>&1 | grep -qi 'Funnel on\|internet'; }
+
+          echo "=== تلاش برای Funnel روی پورت ۱۰۰۰۰ (SSH) ==="
+          for i in 1 2 3 4; do
+            timeout 120 sudo ts funnel --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/tmp/f_ssh.log 2>&1
+            rc=$?
+            logf "attempt#$i rc=$rc" /tmp/f_ssh.log
+            sleep 6
+            is_pub && { echo "FUNNEL-SSH OK"; break; }
+            timeout 60 sudo ts serve --tls-terminated-tcp=10000 off >/dev/null 2>&1
+            timeout 60 sudo ts funnel --tls-terminated-tcp=10000 off >/dev/null 2>&1
+            sleep 6
+          done
+
+          echo "=== تلاش برای Funnel روی پورت ۸۴۴۳ (وب) ==="
+          for i in 1 2 3; do
+            timeout 120 sudo ts funnel --bg --https=8443 http://127.0.0.1:8080 >/tmp/f_web.log 2>&1
+            rc=$?
+            logf "web attempt#$i rc=$rc" /tmp/f_web.log
+            sleep 5
+            sudo ts funnel status 2>&1 | grep -q ':8443.*Funnel on\|https://.*8443.*(Funnel on)' && { echo "FUNNEL-WEB OK"; break; }
+            sudo ts funnel status 2>&1 | grep -qi 'internet' && { echo "FUNNEL-WEB OK"; break; }
+            timeout 60 sudo ts serve --https=8443 off >/dev/null 2>&1
+            sleep 5
+          done
+
+          sleep 3
+          echo "=== serve status ==="
+          sudo ts serve status 2>&1 | head -25 | tee /tmp/serve_status.txt
+          echo "=== funnel status ==="
+          sudo ts funnel status 2>&1 | head -25 | tee /tmp/funnel_status.txt
+
+          if ! is_pub; then
+            echo "Funnel عمومی نشد -> serve برای دسترسی داخل tailnet"
+            timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/tmp/s_ssh.log 2>&1
+            timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 >/tmp/s_web.log 2>&1
+            cat /tmp/s_ssh.log | tail -6
           fi
           sleep 2
-          echo "=== serve status ==="
-          sudo ts serve status 2>&1 | head -25
-          echo "=== funnel status ==="
-          sudo ts funnel status 2>&1 | head -25
-          echo "=== resolve عمومی ==="
-          getent hosts "$FQDN" 2>&1 || echo "public DNS: NXDOMAIN"
-          if echo "$FS" | grep -qi 'internet'; then echo "FUNNEL_PUBLIC=yes" >> "$GITHUB_ENV"; else echo "FUNNEL_PUBLIC=no" >> "$GITHUB_ENV"; fi
+          echo "=== وضعیت نهایی ==="
+          sudo ts funnel status 2>&1 | head -25 | tee /tmp/funnel_final.txt
+          if is_pub; then echo "FUNNEL_PUBLIC=yes" >> "$GITHUB_ENV"; else echo "FUNNEL_PUBLIC=no" >> "$GITHUB_ENV"; fi
           echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@${FQDN}" >> "$GITHUB_ENV"
           echo "FUNNEL_WEB=https://${FQDN}:8443/" >> "$GITHUB_ENV"
           exit 0
@@ -364,6 +386,12 @@ jobs:
             sudo ts serve status 2>&1 | head -20
             echo "-- funnel status --"
             sudo ts funnel status 2>&1 | head -20
+            echo "-- تلاش‌های funnel (ssh) --"
+            cat /tmp/f_ssh.log 2>&1 | tail -16
+            echo "-- تلاش‌های funnel (web) --"
+            cat /tmp/f_web.log 2>&1 | tail -12
+            echo "-- fallback serve --"
+            cat /tmp/s_ssh.log 2>&1 | tail -8
             echo "-- resolve عمومی --"
             getent hosts "$FQ" 2>&1 || echo NXDOMAIN
             echo '```'
@@ -415,9 +443,11 @@ jobs:
               sleep 2
               echo "[$(date -u +%H:%M)] سرویس وب بازیابی شد"
             fi
-            if ! sudo ts funnel status 2>&1 | grep -q ':10000'; then
-              sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/dev/null 2>&1
-              echo "[$(date -u +%H:%M)] forward پورت ۱۰۰۰۰ بازیابی شد"
+            if ! sudo ts funnel status 2>&1 | grep -qi 'Funnel on'; then
+              sudo install -d -m 0755 /run/sshd
+              timeout 90 sudo ts funnel --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/dev/null 2>&1
+              timeout 90 sudo ts funnel --bg --https=8443 http://127.0.0.1:8080 >/dev/null 2>&1
+              echo "[$(date -u +%H:%M)] funnel بازیابی شد"
             fi
             echo "[$(date -u +%H:%M)] alive | ts=$(sudo ts ip -4 2>/dev/null | head -1) | sshd=$(pgrep -c sshd 2>/dev/null || echo 0)"
             sleep 60
