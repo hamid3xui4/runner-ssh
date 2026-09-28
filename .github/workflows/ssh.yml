@@ -201,28 +201,23 @@ jobs:
             sleep 6
           done
 
-          echo "=== تلاش برای Funnel روی پورت ۴۴۳ (وب - برای تست از بیرون) ==="
-          for i in 1 2 3; do
-            timeout 120 sudo ts funnel --bg --https=443 http://127.0.0.1:8080 >/tmp/f_443.log 2>&1
-            logf "443 attempt#$i rc=$?" /tmp/f_443.log
-            sleep 5
-            sudo ts funnel status 2>&1 | grep -q ':443 (Funnel on)\|ts.net:443.*Funnel on' && { echo "FUNNEL-443 OK"; break; }
-            timeout 60 sudo ts serve --https=443 off >/dev/null 2>&1
-            sleep 4
-          done
+          echo "=== تلاش برای Funnel (یک‌بار؛ روی رانر GitHub معمولاً به دلیل userspace-networking کار نمی‌کند) ==="
+          timeout 90 sudo ts funnel --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/tmp/f_ssh.log 2>&1
+          logf "funnel-ssh rc=$?" /tmp/f_ssh.log
+          timeout 90 sudo ts funnel --bg --https=8443 http://127.0.0.1:8080 >/tmp/f_web.log 2>&1
+          logf "funnel-web rc=$?" /tmp/f_web.log
+          sleep 4
 
-          echo "=== تلاش برای Funnel روی پورت ۸۴۴۳ (وب) ==="
-          for i in 1 2 3; do
-            timeout 120 sudo ts funnel --bg --https=8443 http://127.0.0.1:8080 >/tmp/f_web.log 2>&1
-            rc=$?
-            logf "web attempt#$i rc=$rc" /tmp/f_web.log
-            sleep 5
-            sudo ts funnel status 2>&1 | grep -q ':8443.*Funnel on\|https://.*8443.*(Funnel on)' && { echo "FUNNEL-WEB OK"; break; }
-            sudo ts funnel status 2>&1 | grep -qi 'internet' && { echo "FUNNEL-WEB OK"; break; }
-            timeout 60 sudo ts serve --https=8443 off >/dev/null 2>&1
-            sleep 5
-          done
-
+          # اگر funnel عمومی نشد، serve را مطمئن کن (دسترسی از گوشی داخل tailnet)
+          if ! sudo ts funnel status 2>&1 | grep -qi 'Funnel on'; then
+            echo "funnel فعال نشد -> serve (داخل tailnet)"
+            timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/tmp/s_ssh.log 2>&1
+            timeout 90 sudo ts serve --bg --https=8443 --set-path=/ http://127.0.0.1:8080 >/tmp/s_web.log 2>&1
+          fi
+          # اطمینان از اینکه sshd و وب همچنان بالا هستند
+          sudo install -d -m 0755 /run/sshd
+          ss -ltn | grep -qE ':22\s' || { sudo bash -c 'nohup /usr/sbin/sshd -D -e >>/tmp/sshd.log 2>&1 &'; sleep 3; }
+          curl -s -m 3 -o /dev/null http://127.0.0.1:8080/ || { (cd /tmp/status && nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &); sleep 2; }
           sleep 3
           echo "=== serve status ==="
           sudo ts serve status 2>&1 | head -25 | tee /tmp/serve_status.txt
@@ -315,15 +310,15 @@ jobs:
           case "$A" in *ROOT_LOGIN_OK*) RT="موفق ✅";; *) RT="ناموفق ❌";; esac
           case "$B" in *HAMID_LOGIN_OK*) HT="موفق ✅";; *) HT="ناموفق ❌";; esac
           sudo ts status 2>&1 | grep -q 'offers exit node' && EX="فعال ✅" || EX="غيرفعال ❌"
-          [ "${FUNNEL_PUBLIC:-no}" = "yes" ] && FU="عمومی ✅" || FU="فقط داخل tailnet ⚠️"
+          if sudo ts funnel status 2>&1 | grep -qi 'Funnel on'; then
+            FU="در CLI فعال است، ولی از اینترنت تست نشد ⚠️ (رانر GitHub ورودی بیرونی ندارد)"
+          else
+            FU="فقط serve داخل tailnet ⚠️"
+          fi
           TOTAL="${{ github.event.inputs.minutes }}"; [ -z "$TOTAL" ] && TOTAL=350
           ENDT=$(date -u -d "@$(( $(date +%s) + (TOTAL-8)*60 ))" '+%H:%M' 2>/dev/null || echo '-')
 
-          if [ "${FUNNEL_PUBLIC:-no}" = "yes" ]; then
-            MAIN_HOST="$FQ"; MAIN_PORT="10000"; MAIN_LABEL="Funnel عمومی (بدون نیاز به Tailscale)"
-          else
-            MAIN_HOST="$TS_IP"; MAIN_PORT="22"; MAIN_LABEL="Tailscale (پیشنهادی)"
-          fi
+          MAIN_HOST="$TS_IP"; MAIN_PORT="22"; MAIN_LABEL="Tailscale (راه اصلی و تضمین‌شده)"
 
           {
             echo '# اطلاعات اتصال سرور'
@@ -357,7 +352,7 @@ jobs:
             echo "# ۲) از طریق پورت ۱۰۰۰۰ (serve/funnel)"
             echo "ssh -p 10000 -o StrictHostKeyChecking=no root@$FQ"
             echo '```'
-            echo "صفحهٔ وضعیت: https://$FQ:8443/  و  https://$FQ/"
+            echo "صفحهٔ وضعیت داخل tailnet: https://$FQ:8443/"
             echo
             echo '## Exit node روی گوشی'
             echo "اپ Tailscale → منو → Exit node → \`$HOSTNAME_TS\`"
