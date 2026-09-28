@@ -145,9 +145,15 @@ jobs:
           timeout 90 sudo ts serve --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -4 || echo "serve-10000 failed"
 
           echo "=== funnel (روی اینترنت عمومی) ==="
-          timeout 90 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 on 2>&1 | tail -8 || echo "funnel-8443 failed"
-          timeout 90 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on 2>&1 | tail -10 || echo "funnel-10000 failed"
+          echo "--- تلاش برای 8443 ---"
+          timeout 90 sudo ts funnel --bg --yes --https=8443 http://127.0.0.1:8080 on 2>&1 | tail -10; echo "rc8443=$?"
+          echo "--- تلاش برای 10000 ---"
+          timeout 90 sudo ts funnel --bg --yes --tls-terminated-tcp=10000 tcp://127.0.0.1:22 on 2>&1 | tail -12; echo "rc10000=$?"
           sleep 3
+          echo "=== tags/effectiveTags این گره ==="
+          sudo ts status --json | jq -c '{Tags:.Self.Tags, CapTags:.Self.CapabilityVersion, DNSName:.Self.DNSName}' 2>/dev/null || true
+          echo "=== resolve نام گره ==="
+          getent hosts "$FQDN" || echo "نام گره به‌صورت عمومی حل نشد (یعنی funnel فعال نشده)"
           echo "=== serve status ==="
           sudo ts serve status 2>&1 | head -25 || true
           echo "=== funnel status ==="
@@ -236,6 +242,20 @@ jobs:
           FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
           EXITN=$(sudo ts status 2>&1 | grep -q 'offers exit node' && echo 'فعال ✅' || echo 'غيرفعال ❌')
           FUNS=$(sudo ts funnel status 2>&1 | grep -qi 'internet' && echo 'عمومی ✅' || echo 'فقط داخل tailnet ⚠️')
+          # تست واقعی ورود با پسورد
+          if sshpass -p "$ROOT_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+               -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 \
+               root@127.0.0.1 'echo ok' >/dev/null 2>&1; then
+            SSHTEST="موفق ✅ (ورود با root و پسورد تأیید شد)"
+          else
+            SSHTEST="ناموفق ❌"
+          fi
+          # تست پورت ۱۰۰۰۰ روی IP داخلی
+          if timeout 15 bash -c "exec 3<>/dev/tcp/$TS_IP/10000 && head -c 40 <&3" 2>/dev/null | grep -q SSH; then
+            P10000="موفق ✅"
+          else
+            P10000="ناموفق ❌"
+          fi
           TOTAL="${{ github.event.inputs.minutes }}"; [ -z "$TOTAL" ] && TOTAL=350
           NOW=$(date +%s); ENDT=$(date -u -d "@$(( NOW + (TOTAL-8)*60 ))" '+%H:%M' 2>/dev/null || echo '-')
           {
@@ -252,6 +272,8 @@ jobs:
             echo "| نام گره | \`$HOSTNAME_TS\` / \`$FQ\` |"
             echo "| Exit node | $EXITN |"
             echo "| Funnel | $FUNS |"
+            echo "| تست ورود SSH با پسورد | $SSHTEST |"
+            echo "| تست SSH روی پورت ۱۰۰۰۰ (داخل tailnet) | $P10000 |"
             echo "| پایان تقریبی این اجرا | $ENDT UTC |"
             echo
             echo '## راه اول — از طریق Tailscale (پیشنهادی)'
