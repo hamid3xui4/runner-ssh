@@ -4,13 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       minutes:
-        description: 'مدت زنده ماندن (دقیقه) - حداکثر 355'
+        description: 'مدت زنده ماندن (دقیقه)'
         required: false
-        default: '355'
+        default: '350'
+      chain:
+        description: 'اجرای خودکار رانر بعدی (yes/no)'
+        required: false
+        default: 'yes'
+  schedule:
+    - cron: '*/5 * * * *'
 
 concurrency:
   group: ssh-runner
   cancel-in-progress: false
+
+env:
+  HOSTNAME_TS: gha-ubuntu
+  TS_SOCKET: /var/run/tailscale/tailscaled.sock
 
 jobs:
   runner:
@@ -18,7 +28,7 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: setup-ssh
-        timeout-minutes: 5
+        timeout-minutes: 6
         env:
           ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
           PUBKEY: ${{ secrets.SSH_PUBKEY }}
@@ -26,117 +36,210 @@ jobs:
           set -e
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get -qq update
-          sudo apt-get -qq install -y openssh-server >/dev/null
-          sudo mkdir -p /var/run/sshd /run/sshd
-
-          # پسورد root
-          if [ -z "$ROOT_PASS" ]; then
-            ROOT_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
-            echo "GENERATED_ROOT_PASS=$ROOT_PASS" >> "$GITHUB_ENV"
-          fi
+          sudo apt-get -qq install -y openssh-server sshpass curl net-tools >/dev/null
+          sudo mkdir -p /run/sshd
           echo "root:$ROOT_PASS" | sudo chpasswd
           sudo passwd -u root >/dev/null 2>&1 || true
-
-          # کلید عمومی اختیاری
           if [ -n "$PUBKEY" ]; then
             sudo mkdir -p /root/.ssh
             echo "$PUBKEY" | sudo tee -a /root/.ssh/authorized_keys >/dev/null
-            sudo chmod 700 /root/.ssh
-            sudo chmod 600 /root/.ssh/authorized_keys
+            sudo chmod 700 /root/.ssh && sudo chmod 600 /root/.ssh/authorized_keys
           fi
-
-          # پیکربندی sshd
-          sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?X11Forwarding.*/X11Forwarding yes/' /etc/ssh/sshd_config
+          for k in PermitRootLogin PasswordAuthentication PubkeyAuthentication UsePAM X11Forwarding; do
+            sudo sed -i "s/^#\?$k.*/$k yes/" /etc/ssh/sshd_config
+          done
           sudo sed -i 's/^#\?ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\?ClientAliveCountMax.*/ClientAliveCountMax 100/' /etc/ssh/sshd_config
-          echo 'PermitRootLogin yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
-          echo 'PasswordAuthentication yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
-
+          sudo sed -i 's/^#\?MaxSessions.*/MaxSessions 50/' /etc/ssh/sshd_config
+          { echo 'PermitRootLogin yes'; echo 'PasswordAuthentication yes'; } | sudo tee -a /etc/ssh/sshd_config >/dev/null
           sudo ssh-keygen -A >/dev/null
-          sudo /usr/sbin/sshd -D -e &
+          sudo /usr/sbin/sshd -D -e 2>/tmp/sshd.log &
           sleep 2
-          ss -ltnp | grep ':22 ' || sudo netstat -ltnp | grep ':22' || true
-          echo "sshd running: $(pgrep -c sshd)"
+          echo "sshd processes: $(pgrep -c sshd)"
+          ss -ltn | grep -E ':22\s' && echo "PORT22_OK"
 
       - name: setup-tailscale
-        timeout-minutes: 5
+        timeout-minutes: 8
         env:
           TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          TSAPI: ${{ secrets.TAILSCALE_API_TOKEN }}
         run: |
           set -e
           export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get -qq install -y curl ca-certificates >/dev/null
           curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || true
           sudo mkdir -p /var/run/tailscale /var/lib/tailscale
-          # رانر GitHub سیستم systemd ندارد -> tailscaled دستی اجرا می‌شود
-          sudo nohup tailscaled --tun=userspace-networking \
-               --socket=/var/run/tailscale/tailscaled.sock \
-               --statedir=/var/lib/tailscale \
-               > /tmp/tailscaled.log 2>&1 &
-          for i in $(seq 1 20); do
-            if tailscale status >/dev/null 2>&1; then break; fi
-            sleep 1
-          done
-          sudo -E tailscale up --authkey="$TSKEY" --hostname="gha-$(date +%s | tail -c 6)" --reset --accept-routes=false || \
-            tailscale up --authkey="$TSKEY" --hostname="gha-$(date +%s | tail -c 6)" --reset
-          sleep 2
-          TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
-          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
-          echo "tailscale ip: $TS_IP"
+          sudo tee /usr/local/bin/ts >/dev/null <<'WRAP'
+          #!/bin/bash
+          exec tailscale --socket=/var/run/tailscale/tailscaled.sock "$@"
+          WRAP
+          sudo chmod +x /usr/local/bin/ts
 
-      - name: print-connection-info
+          # پاک‌کردن گرهٔ خاموشِ هم‌نام تا نام و IP ثابت بماند
+          if [ -n "$TSAPI" ]; then
+            for id in $(curl -s -m 25 -u "$TSAPI:" \
+              "https://api.tailscale.com/api/v2/tailnet/-/devices" \
+              | jq -r --arg h "$HOSTNAME_TS" '.devices[]? | select(.hostname==$h and .connectedToControl==false) | .id'); do
+              code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X DELETE -u "$TSAPI:" \
+                "https://api.tailscale.com/api/v2/device/$id")
+              echo "delete old node $id -> $code"
+            done
+          fi
+
+          sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock \
+               --statedir=/var/lib/tailscale > /tmp/tailscaled.log 2>&1 &
+          for i in $(seq 1 25); do sudo ts status >/dev/null 2>&1 && break; sleep 1; done
+
+          sudo -E ts up --authkey="$TSKEY" --hostname="$HOSTNAME_TS" --reset \
+               --advertise-exit-node --accept-routes=false --accept-dns=false --ssh=false
+          sleep 3
+          TS_IP=$(sudo ts ip -4 | head -1)
+          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
+          echo "FQDN=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')" >> "$GITHUB_ENV"
+          echo "TAILSCALE IP = $TS_IP"
+          sudo ts status | head -5 || true
+
+      - name: setup-funnel
+        timeout-minutes: 8
+        run: |
+          mkdir -p /tmp/status && cd /tmp/status
+          cat > index.html <<HTML
+          <!doctype html><meta charset="utf-8"><title>runner status</title>
+          <h1>Ubuntu 22.04 runner</h1><pre>host: $(hostname)
+          tailscale ip: ${TS_IP:-n/a}
+          updated: $(date -u)
+          </pre>
+          HTML
+          nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
+          sleep 2
+
+          echo "--- serve config ---"
+          sudo ts serve --https=8443 --set-path / http://127.0.0.1:8080 2>&1 | tail -3 || true
+          sudo ts serve --tls-terminated-tcp=10000 tcp://127.0.0.1:22 2>&1 | tail -5 || true
+          echo "--- funnel on ---"
+          sudo ts funnel 8443 on 2>&1 | tail -6 || true
+          sudo ts funnel 10000 on 2>&1 | tail -8 || true
+          sleep 3
+          echo "--- serve status ---"
+          sudo ts serve status 2>&1 | head -25 || true
+          echo "--- funnel status ---"
+          sudo ts funnel status 2>&1 | head -25 || true
+          FQDN=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
+          echo "FQDN=$FQDN" >> "$GITHUB_ENV"
+          echo "FUNNEL_SSH=ssh -p 10000 -o StrictHostKeyChecking=no root@$FQDN" >> "$GITHUB_ENV"
+          echo "FUNNEL_WEB=https://$FQDN:8443/" >> "$GITHUB_ENV"
+
+      - name: self-check
+        timeout-minutes: 5
         env:
           ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
-          GENERATED: ${{ env.GENERATED_ROOT_PASS }}
         run: |
-          PASS="${ROOT_PASS:-$GENERATED}"
-          PUBIP=$(curl -s -m 10 https://api.ipify.org || echo "n/a")
-          HOST=$(hostname)
-          TS_IP="${TS_IP:-$(tailscale ip -4 2>/dev/null | head -1)}"
-          {
-            echo "=============================================="
-            echo "  سرور Ubuntu 22.04 آماده است"
-            echo "=============================================="
-            echo "hostname        : $HOST"
-            echo "public ip       : $PUBIP  (ورودی از بیرون بسته است)"
-            echo "tailscale ip    : $TS_IP  <-- از این استفاده کنید"
-            echo "user            : root"
-            echo "password        : $PASS"
-            echo "----------------------------------------------"
-            echo "دستور اتصال:"
-            echo "  ssh root@$TS_IP"
-            echo "----------------------------------------------"
-            echo "tailscale status:"
-            tailscale status 2>/dev/null | head -20 || true
-            echo "=============================================="
-          } | tee /tmp/conn.txt
-          # برای اینکه در لاگ GitHub هم با جست‌وجو پیدا شود
-          echo "SSH_PASSWORD=$PASS" >> "$GITHUB_ENV"
+          R=0
+          echo "### 1) port 22"
+          ss -ltn | grep -E ':22\s' && echo OK1 || { echo FAIL1; R=1; }
+          echo "### 2) ورود SSH با پسورد (loopback)"
+          if sshpass -p "$ROOT_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+              root@127.0.0.1 'echo LOGIN_OK $(whoami) $(lsb_release -ds)' 2>/dev/null; then echo OK2; else echo FAIL2; R=2; fi
+          echo "### 3) tailscale"
+          sudo ts ip -4 | head -1 && echo OK3 || { echo FAIL3; R=3; }
+          echo "### 4) exit-node"
+          ADV=$(sudo ts status --json | jq -r '.Self.PrimaryRoutes // [] | join(",")')
+          echo "advertised routes: $ADV"
+          case "$ADV" in *0.0.0.0/0*) echo OK4;; *) echo "WARN4 (exit-node در فهرست نیست)";; esac
+          echo "### 5) funnel"
+          if sudo ts funnel status 2>&1 | grep -qiE 'https://|10000'; then echo OK5; else echo "WARN5"; fi
+          echo "### 6) تست funnel از راه دور"
+          FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
+          for u in "https://$FQ:8443/"; do
+            code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$u" || echo 000)
+            echo "web $u -> $code"
+          done
+          echo "CHECK_RESULT=$R" >> "$GITHUB_ENV"
+          echo "==== جمع‌بندی: $([ "$R" = 0 ] && echo 'همه تست‌ها موفق' || echo 'خطا در تست شمارهٔ '$R') ===="
+
+      - name: publish-info
+        timeout-minutes: 3
+        env:
+          PAT: ${{ secrets.GH_PAT }}
+          ROOT_PASS: ${{ secrets.SSH_ROOT_PASS }}
+        run: |
+          TS_IP=$(sudo ts ip -4 | head -1)
+          FQ=$(sudo ts status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
+          ADV=$(sudo ts status --json | jq -r '.Self.PrimaryRoutes // [] | join(", ")')
+          RUN_END=$(date -u -d "+$(( ${TOTAL_MIN:-350} )) minutes" +%H:%M 2>/dev/null || echo "-")
+          cat > /tmp/CONNECTION.md <<EOF
+          # اطلاعات اتصال سرور
+
+          > این فایل به‌صورت خودکار در هر اجرای جدید به‌روز می‌شود.
+
+          | مورد | مقدار |
+          |---|---|
+          | به‌روزرسانی | $(date -u '+%Y-%m-%d %H:%M:%S') UTC |
+          | کاربر SSH | \`root\` |
+          | پسورد SSH | \`$ROOT_PASS\` |
+          | IP داخل Tailscale | \`$TS_IP\` |
+          | نام کامل گره | \`$FQ\` |
+          | exit-node | $(case "$ADV" in *0.0.0.0/0*) echo 'فعال ✅';; *) echo 'غيرفعال ❌';; esac) ($ADV) |
+          | پایان تقریبی این اجرا | $RUN_END UTC |
+
+          ## راه اول — از طریق Tailscale (پیشنهادی)
+          \`\`\`bash
+          ssh root@$TS_IP
+          \`\`\`
+
+          ## راه دوم — از طریق Funnel (بدون نیاز به Tailscale، از هر اینترنتی)
+          \`\`\`bash
+          ssh -p 10000 -o StrictHostKeyChecking=no root@$FQ
+          \`\`\`
+
+          صفحهٔ وضعیت عمومی: https://$FQ:8443/
+
+          ## exit node روی گوشی
+          در اپ Tailscale گزینهٔ Exit node را روی \`$HOSTNAME_TS\` بگذارید.
+          EOF
+          sed -i 's/^          //' /tmp/CONNECTION.md
+          B64=$(base64 -w0 /tmp/CONNECTION.md)
+          SHA=$(curl -s -m 20 -H "Authorization: token $PAT" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/CONNECTION.md" | jq -r '.sha // empty')
+          if [ -n "$SHA" ]; then EXTRA=",\"sha\":\"$SHA\""; else EXTRA=""; fi
+          curl -s -m 30 -o /dev/null -w 'publish CONNECTION.md -> HTTP %{http_code}\n' -X PUT \
+            -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/CONNECTION.md" \
+            -d "{\"message\":\"update connection info\",\"content\":\"$B64\",\"branch\":\"main\"$EXTRA}"
+          echo "================ اطلاعات اتصال ================"
+          cat /tmp/CONNECTION.md | head -30
+          echo "==============================================="
 
       - name: keep-alive
-        timeout-minutes: 360
+        timeout-minutes: 355
+        env:
+          TSKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          TOTAL=${{ github.event.inputs.minutes || 355 }}
-          [ -z "$TOTAL" ] && TOTAL=355
-          ENDS=$(( $(date +%s) + TOTAL*60 ))
-          echo "سرور تا $TOTAL دقیقه زنده می‌ماند."
+          TOTAL="${{ github.event.inputs.minutes }}"
+          [ -z "$TOTAL" ] && TOTAL=350
+          CHAIN="${{ github.event.inputs.chain }}"
+          [ -z "$CHAIN" ] && CHAIN=yes
+          LIFE=$(( TOTAL - 8 ))
+          ENDS=$(( $(date +%s) + LIFE*60 ))
+          echo "سرور تا $LIFE دقیقه زنده می‌ماند، سپس رانر بعدی راه می‌افتد (chain=$CHAIN)."
           while [ "$(date +%s)" -lt "$ENDS" ]; do
-            if ! pgrep -x tailscaled >/dev/null; then
-              sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock --statedir=/var/lib/tailscale >/tmp/tailscaled.log 2>&1 &
-              sleep 2
-              tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --reset >/dev/null 2>&1 || true
-              echo "[$(date -u +%H:%M:%S)] tailscaled restarted"
-            fi
-            if ! pgrep -x sshd >/dev/null; then
-              sudo /usr/sbin/sshd -D -e & sleep 1
-              echo "[$(date -u +%H:%M:%S)] sshd restarted"
-            fi
-            echo "[$(date -u +%H:%M:%S)] alive | ts=$(tailscale ip -4 2>/dev/null | head -1) | ssh=$(pgrep -c sshd 2>/dev/null || echo 0)"
+            pgrep -x tailscaled >/dev/null || { sudo nohup tailscaled --tun=userspace-networking --socket=/var/run/tailscale/tailscaled.sock --statedir=/var/lib/tailscale >/tmp/tailscaled.log 2>&1 & sleep 3; sudo -E ts up --authkey="$TSKEY" --hostname="$HOSTNAME_TS" --reset --advertise-exit-node --accept-dns=false >/dev/null 2>&1; echo "[$(date -u +%H:%M)] tailscaled دوباره راه‌اندازی شد"; }
+            pgrep -x sshd >/dev/null || { sudo /usr/sbin/sshd -D -e & sleep 1; echo "[$(date -u +%H:%M)] sshd دوباره راه‌اندازی شد"; }
+            curl -s -m 3 -o /dev/null http://127.0.0.1:8080/ || { (cd /tmp/status && nohup python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &) ; sleep 2; sudo ts serve --tls-terminated-tcp=10000 tcp://127.0.0.1:22 >/dev/null 2>&1; sudo ts funnel 10000 on >/dev/null 2>&1; echo "[$(date -u +%H:%M)] http/serve/funnel بازیابی شد"; }
+            echo "[$(date -u +%H:%M)] alive | ts=$(sudo ts ip -4 2>/dev/null | head -1) | sshd=$(pgrep -c sshd 2>/dev/null || echo 0)"
             sleep 60
           done
-          echo "زمان تمام شد."
+          echo "پایان عمر این رانر — راه‌اندازی رانر بعدی"
+          if [ "$CHAIN" = "yes" ]; then
+            for i in 1 2 3; do
+              code=$(curl -s -m 25 -o /dev/null -w '%{http_code}' -X POST \
+                -H "Authorization: token ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ssh.yml/dispatches" \
+                -d "{\"ref\":\"main\",\"inputs\":{\"minutes\":\"$TOTAL\",\"chain\":\"yes\"}}")
+              echo "dispatch attempt $i -> HTTP $code"
+              [ "$code" = "204" ] && break
+              sleep 5
+            done
+          else
+            echo "chain غیرفعال است؛ رانر بعدی اجرا نمی‌شود."
+          fi
