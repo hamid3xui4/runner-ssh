@@ -1,15 +1,15 @@
 # گزارش تشخیصی
 
 ```
-date: Tue Oct  6 20:42:53 UTC 2026
+date: Wed Oct  7 02:28:30 UTC 2026
 -- sshd -T --
 authenticationmethods any
 passwordauthentication yes
 permitrootlogin yes
 usepam yes
 -- passwd -S --
-root P 10/06/2026 -1 -1 -1 -1
-hamid P 10/06/2026 0 99999 7 -1
+root P 10/07/2026 -1 -1 -1 -1
+hamid P 10/07/2026 0 99999 7 -1
 -- تست root --
 Warning: Permanently added '127.0.0.1' (ED25519) to the list of known hosts.
 ROOT_LOGIN_OK
@@ -38,31 +38,31 @@ auth	requisite			pam_deny.so
 auth	required			pam_permit.so
 auth	optional			pam_cap.so 
 -- پروسه‌های sshd --
-   2465 sshd: /usr/sbin/sshd -E /tmp/sshd2.log [listener] 1 of 10-100 startups
-   4102 sshd: [accepted]
+   2424 sshd: /usr/sbin/sshd -E /tmp/sshd2.log [listener] 1 of 10-100 startups
+   4089 sshd: [accepted]
 -- لاگ sshd --
 Missing privilege separation directory: /run/sshd
 -- auth.log --
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
-Oct  6 20:42:53 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/sshd
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
-Oct  6 20:42:53 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/common-auth
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
-Oct  6 20:42:53 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -25 /tmp/sshd.log
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
-Oct  6 20:42:53 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -18 /var/log/auth.log
-Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
+Oct  7 02:28:30 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/sshd
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
+Oct  7 02:28:30 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/common-auth
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
+Oct  7 02:28:30 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -25 /tmp/sshd.log
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session closed for user root
+Oct  7 02:28:30 runnervma94yk sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -18 /var/log/auth.log
+Oct  7 02:28:30 runnervma94yk sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
 -- ts status --
-100.106.142.92   gha-ubuntu        novinsazeh.mrv@  linux    idle; offers exit node      
+100.114.144.118  gha-ubuntu        novinsazeh.mrv@  linux    idle; offers exit node      
 100.85.218.16    hamid             novinsazeh.mrv@  windows  offline, last seen 1d ago   
 100.67.118.27    hrg-backup-1      novinsazeh.mrv@  linux    offline, last seen 8d ago   
 100.113.93.5     hrg-backup-10     novinsazeh.mrv@  linux    offline, last seen 6d ago   
 100.84.118.3     hrg-backup-11     novinsazeh.mrv@  linux    offline, last seen 6d ago   
 100.71.6.61      hrg-backup-12     novinsazeh.mrv@  linux    offline, last seen 6d ago   
-100.69.108.19    hrg-backup-13     novinsazeh.mrv@  linux    offline, last seen 5d ago   
+100.69.108.19    hrg-backup-13     novinsazeh.mrv@  linux    offline, last seen 6d ago   
 100.105.162.67   hrg-backup-14     novinsazeh.mrv@  linux    offline, last seen 5d ago   
 -- tags --
 {"Tags":null,"DNSName":"gha-ubuntu.tail3641f4.ts.net.","Online":true}
@@ -73,8 +73,8 @@ Oct  6 20:42:53 runnervma94yk sudo: pam_unix(sudo:session): session opened for u
 #     - https://gha-ubuntu.tail3641f4.ts.net:8443
 
 |-- tcp://gha-ubuntu.tail3641f4.ts.net:10000 (TLS-terminated TCP, Funnel on)
-|-- tcp://100.106.142.92:10000
-|-- tcp://[fd7a:115c:a1e0::df35:8e5d]:10000
+|-- tcp://100.114.144.118:10000
+|-- tcp://[fd7a:115c:a1e0::6035:9077]:10000
 |--> tcp://127.0.0.1:22
 
 https://gha-ubuntu.tail3641f4.ts.net:8443 (Funnel on)
@@ -87,8 +87,8 @@ https://gha-ubuntu.tail3641f4.ts.net:8443 (Funnel on)
 #     - https://gha-ubuntu.tail3641f4.ts.net:8443
 
 |-- tcp://gha-ubuntu.tail3641f4.ts.net:10000 (TLS-terminated TCP, Funnel on)
-|-- tcp://100.106.142.92:10000
-|-- tcp://[fd7a:115c:a1e0::df35:8e5d]:10000
+|-- tcp://100.114.144.118:10000
+|-- tcp://[fd7a:115c:a1e0::6035:9077]:10000
 |--> tcp://127.0.0.1:22
 
 https://gha-ubuntu.tail3641f4.ts.net:8443 (Funnel on)
@@ -98,8 +98,8 @@ https://gha-ubuntu.tail3641f4.ts.net:8443 (Funnel on)
 Available on the internet:
 
 |-- tcp://gha-ubuntu.tail3641f4.ts.net:10000 (TLS terminated)
-|-- tcp://100.106.142.92:10000
-|-- tcp://[fd7a:115c:a1e0::df35:8e5d]:10000
+|-- tcp://100.114.144.118:10000
+|-- tcp://[fd7a:115c:a1e0::6035:9077]:10000
 |--> tcp://127.0.0.1:22
 
 Funnel started and running in the background.
