@@ -4,32 +4,32 @@
 
 | مورد | مقدار |
 |---|---|
-| آخرین به‌روزرسانی | 2026-10-09 17:52:36 UTC |
+| آخرین به‌روزرسانی | 2026-10-09 23:37:39 UTC |
 | کاربر / پسورد | `root` / `hamidgh69` |
 | کاربر پشتیبان | `hamid` / `hamidgh69` (با sudo) |
-| IP داخل Tailscale | `100.126.175.49` |
-| نام گره | `gha-ubuntu` = `gha-ubuntu-1.tail3641f4.ts.net` |
+| IP داخل Tailscale | `100.83.125.86` |
+| نام گره | `gha-ubuntu` = `gha-ubuntu.tail3641f4.ts.net` |
 | Exit node | فعال ✅ |
 | Funnel | در CLI فعال است، ولی از اینترنت تست نشد ⚠️ (رانر GitHub ورودی بیرونی ندارد) |
 | تست ورود root با پسورد | موفق ✅ |
 | تست ورود hamid با پسورد | موفق ✅ |
-| پایان تقریبی این اجرا | 23:34 UTC |
+| پایان تقریبی این اجرا | 05:19 UTC |
 
 ## راه اصلی — Tailscale (راه اصلی و تضمین‌شده)
 ```bash
-ssh -p 22 root@100.126.175.49
+ssh -p 22 root@100.83.125.86
 ```
 
 ## همهٔ راه‌ها
 ```bash
 # ۱) از طریق Tailscale (پیشنهادی)
-ssh root@100.126.175.49
-ssh hamid@100.126.175.49        # سپس: sudo -i
+ssh root@100.83.125.86
+ssh hamid@100.83.125.86        # سپس: sudo -i
 
 # ۲) از طریق پورت ۱۰۰۰۰ (serve/funnel)
-ssh -p 10000 -o StrictHostKeyChecking=no root@gha-ubuntu-1.tail3641f4.ts.net
+ssh -p 10000 -o StrictHostKeyChecking=no root@gha-ubuntu.tail3641f4.ts.net
 ```
-صفحهٔ وضعیت داخل tailnet: https://gha-ubuntu-1.tail3641f4.ts.net:8443/
+صفحهٔ وضعیت داخل tailnet: https://gha-ubuntu.tail3641f4.ts.net:8443/
 
 ## Exit node روی گوشی
 اپ Tailscale → منو → Exit node → `gha-ubuntu`
