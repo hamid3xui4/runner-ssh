@@ -4,27 +4,27 @@
 
 | مورد | مقدار |
 |---|---|
-| آخرین به‌روزرسانی | 2026-10-08 18:50:34 UTC |
+| آخرین به‌روزرسانی | 2026-10-09 00:36:11 UTC |
 | کاربر / پسورد | `root` / `hamidgh69` |
 | کاربر پشتیبان | `hamid` / `hamidgh69` (با sudo) |
-| IP داخل Tailscale | `100.124.173.56` |
+| IP داخل Tailscale | `100.111.97.31` |
 | نام گره | `gha-ubuntu` = `gha-ubuntu.tail3641f4.ts.net` |
 | Exit node | فعال ✅ |
 | Funnel | در CLI فعال است، ولی از اینترنت تست نشد ⚠️ (رانر GitHub ورودی بیرونی ندارد) |
 | تست ورود root با پسورد | موفق ✅ |
 | تست ورود hamid با پسورد | موفق ✅ |
-| پایان تقریبی این اجرا | 00:32 UTC |
+| پایان تقریبی این اجرا | 06:18 UTC |
 
 ## راه اصلی — Tailscale (راه اصلی و تضمین‌شده)
 ```bash
-ssh -p 22 root@100.124.173.56
+ssh -p 22 root@100.111.97.31
 ```
 
 ## همهٔ راه‌ها
 ```bash
 # ۱) از طریق Tailscale (پیشنهادی)
-ssh root@100.124.173.56
-ssh hamid@100.124.173.56        # سپس: sudo -i
+ssh root@100.111.97.31
+ssh hamid@100.111.97.31        # سپس: sudo -i
 
 # ۲) از طریق پورت ۱۰۰۰۰ (serve/funnel)
 ssh -p 10000 -o StrictHostKeyChecking=no root@gha-ubuntu.tail3641f4.ts.net
