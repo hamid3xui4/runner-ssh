@@ -1,15 +1,15 @@
 # گزارش تشخیصی
 
 ```
-date: Mon Oct 19 19:47:06 UTC 2026
+date: Tue Oct 20 01:34:23 UTC 2026
 -- sshd -T --
 authenticationmethods any
 passwordauthentication yes
 permitrootlogin yes
 usepam yes
 -- passwd -S --
-root P 10/19/2026 -1 -1 -1 -1
-hamid P 10/19/2026 0 99999 7 -1
+root P 10/20/2026 -1 -1 -1 -1
+hamid P 10/20/2026 0 99999 7 -1
 -- تست root --
 Warning: Permanently added '127.0.0.1' (ED25519) to the list of known hosts.
 ROOT_LOGIN_OK
@@ -38,67 +38,69 @@ auth	requisite			pam_deny.so
 auth	required			pam_permit.so
 auth	optional			pam_cap.so 
 -- پروسه‌های sshd --
-   2914 sshd: /usr/sbin/sshd -E /tmp/sshd2.log [listener] 0 of 10-100 startups
+   2929 sshd: /usr/sbin/sshd -E /tmp/sshd2.log [listener] 2 of 10-100 startups
+   4578 sshd: [accepted]
+   4588 sshd: [accepted]
 -- لاگ sshd --
 Missing privilege separation directory: /run/sshd
 -- auth.log --
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
-Oct 19 19:47:06 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/sshd
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
-Oct 19 19:47:06 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/common-auth
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
-Oct 19 19:47:06 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -25 /tmp/sshd.log
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
-Oct 19 19:47:06 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -18 /var/log/auth.log
-Oct 19 19:47:06 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
+Oct 20 01:34:23 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/sshd
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
+Oct 20 01:34:23 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/grep -vE ^\\s*(#|$) /etc/pam.d/common-auth
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
+Oct 20 01:34:23 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -25 /tmp/sshd.log
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session closed for user root
+Oct 20 01:34:23 runnervmk1d70 sudo:   runner : PWD=/home/runner/work/runner-ssh/runner-ssh ; USER=root ; COMMAND=/usr/bin/tail -18 /var/log/auth.log
+Oct 20 01:34:23 runnervmk1d70 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1001)
 -- ts status --
-100.110.244.46   gha-ubuntu-1      novinsazeh.mrv@  linux    idle; offers exit node                             
-100.127.19.113   gha-ubuntu        novinsazeh.mrv@  linux    idle; offers exit node; offline, last seen 1m ago  
-100.85.218.16    hamid             novinsazeh.mrv@  windows  offline, last seen 3h ago                          
-100.67.118.27    hrg-backup-1      novinsazeh.mrv@  linux    offline, last seen 21d ago                         
-100.113.93.5     hrg-backup-10     novinsazeh.mrv@  linux    offline, last seen 19d ago                         
-100.84.118.3     hrg-backup-11     novinsazeh.mrv@  linux    offline, last seen 19d ago                         
-100.71.6.61      hrg-backup-12     novinsazeh.mrv@  linux    offline, last seen 19d ago                         
-100.69.108.19    hrg-backup-13     novinsazeh.mrv@  linux    offline, last seen 18d ago                         
+100.89.223.13    gha-ubuntu        novinsazeh.mrv@  linux    idle; offers exit node      
+100.85.218.16    hamid             novinsazeh.mrv@  windows  offline, last seen 8h ago   
+100.67.118.27    hrg-backup-1      novinsazeh.mrv@  linux    offline, last seen 21d ago  
+100.113.93.5     hrg-backup-10     novinsazeh.mrv@  linux    offline, last seen 19d ago  
+100.84.118.3     hrg-backup-11     novinsazeh.mrv@  linux    offline, last seen 19d ago  
+100.71.6.61      hrg-backup-12     novinsazeh.mrv@  linux    offline, last seen 19d ago  
+100.69.108.19    hrg-backup-13     novinsazeh.mrv@  linux    offline, last seen 19d ago  
+100.105.162.67   hrg-backup-14     novinsazeh.mrv@  linux    offline, last seen 18d ago  
 -- tags --
-{"Tags":null,"DNSName":"gha-ubuntu-1.tail3641f4.ts.net.","Online":true}
+{"Tags":null,"DNSName":"gha-ubuntu.tail3641f4.ts.net.","Online":true}
 -- serve status --
 
 # Funnel on:
-#     - tcp://gha-ubuntu-1.tail3641f4.ts.net:10000
-#     - https://gha-ubuntu-1.tail3641f4.ts.net:8443
+#     - tcp://gha-ubuntu.tail3641f4.ts.net:10000
+#     - https://gha-ubuntu.tail3641f4.ts.net:8443
 
-|-- tcp://gha-ubuntu-1.tail3641f4.ts.net:10000 (TLS-terminated TCP, Funnel on)
-|-- tcp://100.110.244.46:10000
-|-- tcp://[fd7a:115c:a1e0::e935:f42f]:10000
+|-- tcp://gha-ubuntu.tail3641f4.ts.net:10000 (TLS-terminated TCP, Funnel on)
+|-- tcp://100.89.223.13:10000
+|-- tcp://[fd7a:115c:a1e0::bb35:df0e]:10000
 |--> tcp://127.0.0.1:22
 
-https://gha-ubuntu-1.tail3641f4.ts.net:8443 (Funnel on)
+https://gha-ubuntu.tail3641f4.ts.net:8443 (Funnel on)
 |-- / proxy http://127.0.0.1:8080
 
 -- funnel status --
 
 # Funnel on:
-#     - tcp://gha-ubuntu-1.tail3641f4.ts.net:10000
-#     - https://gha-ubuntu-1.tail3641f4.ts.net:8443
+#     - tcp://gha-ubuntu.tail3641f4.ts.net:10000
+#     - https://gha-ubuntu.tail3641f4.ts.net:8443
 
-|-- tcp://gha-ubuntu-1.tail3641f4.ts.net:10000 (TLS-terminated TCP, Funnel on)
-|-- tcp://100.110.244.46:10000
-|-- tcp://[fd7a:115c:a1e0::e935:f42f]:10000
+|-- tcp://gha-ubuntu.tail3641f4.ts.net:10000 (TLS-terminated TCP, Funnel on)
+|-- tcp://100.89.223.13:10000
+|-- tcp://[fd7a:115c:a1e0::bb35:df0e]:10000
 |--> tcp://127.0.0.1:22
 
-https://gha-ubuntu-1.tail3641f4.ts.net:8443 (Funnel on)
+https://gha-ubuntu.tail3641f4.ts.net:8443 (Funnel on)
 |-- / proxy http://127.0.0.1:8080
 
 -- تلاش‌های funnel (ssh) --
 Available on the internet:
 
-|-- tcp://gha-ubuntu-1.tail3641f4.ts.net:10000 (TLS terminated)
-|-- tcp://100.110.244.46:10000
-|-- tcp://[fd7a:115c:a1e0::e935:f42f]:10000
+|-- tcp://gha-ubuntu.tail3641f4.ts.net:10000 (TLS terminated)
+|-- tcp://100.89.223.13:10000
+|-- tcp://[fd7a:115c:a1e0::bb35:df0e]:10000
 |--> tcp://127.0.0.1:22
 
 Funnel started and running in the background.
@@ -106,7 +108,7 @@ To disable the proxy, run: tailscale funnel --tls-terminated-tcp=10000 off
 -- تلاش‌های funnel (web 8443) --
 Available on the internet:
 
-https://gha-ubuntu-1.tail3641f4.ts.net:8443/
+https://gha-ubuntu.tail3641f4.ts.net:8443/
 |-- proxy http://127.0.0.1:8080
 
 Funnel started and running in the background.
@@ -116,6 +118,6 @@ cat: /tmp/f_443.log: No such file or directory
 -- fallback serve --
 cat: /tmp/s_ssh.log: No such file or directory
 -- resolve عمومی --
-2607:f740:f::684 gha-ubuntu-1.tail3641f4.ts.net
-2607:f740:f::688 gha-ubuntu-1.tail3641f4.ts.net
+2607:f740:f::688 gha-ubuntu.tail3641f4.ts.net
+2607:f740:f::684 gha-ubuntu.tail3641f4.ts.net
 ```
